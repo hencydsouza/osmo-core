@@ -79,7 +79,7 @@ pub fn manifest_bytes(raw: &[u8], request_ctr: Option<u8>) -> Vec<u8> {
             && p.len() > 10
             && p[0] == 0x4A
             && p[1] == 0x01
-            && request_ctr.map_or(true, |c| p[4] == c)
+            && request_ctr.is_none_or(|c| p[4] == c)
         {
             out.extend_from_slice(&p[10..]);
         }
