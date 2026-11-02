@@ -56,3 +56,19 @@ route"), made without checking the Action 4 notes.
 Fix (test-first, against a fake that behaves like an Action 4): a refusal now falls through to the
 `0x01/0x01` route; `ls` warns when the camera never confirms playback; `-v` logs protocol events; `--dump`
 no longer overwrites a good capture with a run that captured no media records.
+
+## HW-2 re-run after the playback fix (2026-11-03) - live-verified
+
+Three `ls -v` runs in a row: identical results every time, 14 files on the SD card, no warning. Log of each:
+`playback: 0x02/0x0C refused (0xe0), trying 0x01/0x01` then `held via 0x01/0x01` on a cold camera, and
+`already held (the camera says so)` on the following runs; handshake base and channel matched every time.
+This confirms the Action 4 needs the `0x01/0x01` route and that the earlier 10/6/0-file runs were the camera
+being listed while still in capture. The earlier extension-less entry was a partial record from the same cause.
+
+Ground truth: the manifest sizes of the two downloaded files equal the bytes on disk exactly (a 128 MiB video
+and a 6 MiB photo). The captured manifest is saved as a regression fixture (`oa4_live_14.bin`, file names and
+sizes only; the raw dump also contains device status frames and is not committed).
+
+Remaining oddity, understood: four videos (316 to 817 s long, the longest on the card) carry a size of 0 in
+the manifest, so `ls` and `get` now ask the camera for the size over HTTP (the same fallback Osmosis uses).
+That HEAD request is not yet verified live.

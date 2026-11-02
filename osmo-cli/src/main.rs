@@ -2,7 +2,8 @@ mod ble_btleplug;
 
 use clap::{Parser, Subcommand};
 use osmo_cli::listing::{
-    dest_filename, find_file, format_listing, progress_line, validate_get_path,
+    dest_filename, fill_unknown_sizes, find_file, format_listing, known_size, progress_line,
+    validate_get_path,
 };
 use osmo_cli::{config, route::route_warning};
 use osmo_core::ble::{model_name, pair_and_read_wifi, PairOptions};
@@ -125,6 +126,11 @@ fn ls_cmd(ip: &str, port: u16, dump: Option<&PathBuf>, verbose: bool) -> Result<
     eprintln!("Listing {ip}:{port} ...");
     let files = s.list_newest().map_err(session_err);
     warn_if_unconfirmed(&s);
+    let files = files.map(|mut f| {
+        let http = HttpClient::new(ip);
+        fill_unknown_sizes(&mut f, &mut |x| http.head(&x.url_path()));
+        f
+    });
     if let Some(path) = dump {
         if has_media_records(s.last_blob()) {
             std::fs::write(path, s.last_blob())
@@ -165,7 +171,11 @@ fn get_cmd(
             warn_if_unconfirmed(&sess);
             let f = find_file(&files, path)
                 .ok_or("not in the camera's newest listing: pass --storage N to fetch by path")?;
-            (f.storage, Some(f.size_bytes).filter(|s| *s > 0), Some(sess))
+            (
+                f.storage,
+                known_size(f, || http.head(&f.url_path())),
+                Some(sess),
+            )
         }
     };
 

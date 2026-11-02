@@ -32,6 +32,30 @@ pub fn progress_line(done: u64, total: Option<u64>) -> String {
     }
 }
 
+/// The manifest's size, or (when it is 0, as for the longest videos) whatever the camera reports over HTTP.
+pub fn known_size(f: &CameraFile, head: impl FnOnce() -> Option<u64>) -> Option<u64> {
+    if f.size_bytes > 0 {
+        Some(f.size_bytes)
+    } else {
+        head()
+    }
+}
+
+/// Fill in sizes the manifest left at 0 by asking the camera. Returns how many were filled.
+pub fn fill_unknown_sizes(
+    files: &mut [CameraFile],
+    head: &mut dyn FnMut(&CameraFile) -> Option<u64>,
+) -> usize {
+    let mut filled = 0;
+    for f in files.iter_mut().filter(|f| f.size_bytes == 0) {
+        if let Some(n) = head(f) {
+            f.size_bytes = n;
+            filled += 1;
+        }
+    }
+    filled
+}
+
 pub fn format_listing(files: &[CameraFile]) -> String {
     if files.is_empty() {
         return "no files".to_string();
@@ -113,6 +137,39 @@ mod tests {
             progress_line(7_000_000, Some(6_000_000)),
             "6.7 MiB / 5.7 MiB (100%)"
         );
+    }
+
+    #[test]
+    fn fill_unknown_sizes_asks_only_for_files_the_manifest_could_not_size() {
+        let mut files = vec![
+            file("DCIM/DJI_001/A.MP4", 0, 0),
+            file("DCIM/DJI_001/B.MP4", 0, 99),
+            file("DCIM/DJI_001/C.MP4", 1, 0),
+        ];
+        let mut asked = vec![];
+        let filled = fill_unknown_sizes(&mut files, &mut |f| {
+            asked.push(f.name.clone());
+            (f.name == "A.MP4").then_some(5_000_000_000)
+        });
+        assert_eq!(
+            asked,
+            vec!["A.MP4", "C.MP4"],
+            "a file with a known size is never asked about"
+        );
+        assert_eq!(filled, 1);
+        assert_eq!(
+            files.iter().map(|f| f.size_bytes).collect::<Vec<_>>(),
+            vec![5_000_000_000, 99, 0]
+        );
+    }
+
+    #[test]
+    fn known_size_prefers_the_manifest_and_only_then_asks_the_camera() {
+        let f = file("DCIM/DJI_001/A.MP4", 0, 123);
+        assert_eq!(known_size(&f, || panic!("must not ask")), Some(123));
+        let z = file("DCIM/DJI_001/B.MP4", 0, 0);
+        assert_eq!(known_size(&z, || Some(7)), Some(7));
+        assert_eq!(known_size(&z, || None), None);
     }
 
     #[test]
