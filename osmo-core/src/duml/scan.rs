@@ -149,6 +149,14 @@ mod tests {
     }
 
     #[test]
+    fn scan_frames_finds_a_tunnelled_inner_frame() {
+        let inner = frame(0x00, 0x27, vec![0x4A, 0x01]);
+        let outer = frame(0x51, 0x01, inner);
+        let sets: Vec<(u8, u8)> = scan_frames(&outer).iter().map(|s| (s.set, s.cmd)).collect();
+        assert!(sets.contains(&(0x51, 0x01)) && sets.contains(&(0x00, 0x27)));
+    }
+
+    #[test]
     fn find_reply_skips_empty_transport_ack() {
         let d1 = frame(0x02, 0x0C, vec![]);
         let d2 = frame(0x02, 0x0C, vec![0x00]);
