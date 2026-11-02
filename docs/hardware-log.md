@@ -86,3 +86,11 @@ That HEAD request is not yet verified live.
 - **Change:** `get` now holds the datalink open by default (`--no-keepalive` to disable), logs each download
   attempt with `-v`, and a stalled download now says how to wake the camera and resume.
   Not yet re-verified live.
+
+## Keepalive and AP wake re-verified (2026-11-03) - live-verified
+
+With the datalink held open (the new default), a 5.2 GiB video downloaded in a single attempt
+(`attempt 1 from 0: Done`) with no stall and no hotspot drop; the result is a valid MP4 of exactly the
+manifest size. The `0x53/0x10` wake also brought the AP up on every `osmo wifi` run since it was added
+(about five, plus the earlier 2.0 GiB run). Not yet tested: a card with no files, Bluetooth off, and a
+multi-attempt download *with* keepalive (no cuts happened in either keepalive run).

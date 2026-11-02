@@ -33,10 +33,9 @@ osmo get DCIM/100MEDIA/DJI_20260101_0001_D.MP4 -o ~/Movies/osmo
 
 `get` takes the path exactly as `ls` prints it and resumes a partial file (Ctrl-C leaves a resumable partial
 file; the camera leaves playback mode on its own a few seconds later). It holds the datalink open while
-downloading as a precaution: Osmosis documents that the camera puts its WiFi to sleep when idle, and on the
-Action 4 the WiFi was seen dropping during long, interrupted downloads that held no datalink. Whether holding it
-fully prevents that on a multi-GB file is not yet confirmed (`--no-keepalive` turns it off, and `--storage` skips
-the datalink entirely). If the WiFi drops, run `osmo wifi`, rejoin, and re-run the same `get`: it resumes.
+downloading: the camera puts its WiFi to sleep when idle, and on the Action 4 the WiFi dropped during long,
+interrupted downloads that held no datalink. With the datalink held, a 5.2 GiB download finished in one attempt
+with no drop (`--no-keepalive` turns it off, and `--storage` skips the datalink entirely). If the WiFi drops, run `osmo wifi`, rejoin, and re-run the same `get`: it resumes.
 `-v` logs every download attempt.
 
 macOS: your terminal needs Bluetooth permission (System Settings > Privacy & Security > Bluetooth).
