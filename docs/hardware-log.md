@@ -108,3 +108,12 @@ multi-attempt download *with* keepalive (no cuts happened in either keepalive ru
   fall back to a still's own handle candidate (paging only reads; delete still requires the verified handle).
 - Not covered live: internal-store paging (the Action 4 has none), a genuinely cut-short page (fixture-tested
   only), and a card with more than one default-size page (this card has 14 files).
+
+## HW-B: thumbnails and sidecars (2026-11-03) - live-verified
+
+- `osmo thumb` on a photo and on a video: both came from the camera's `.scr` file (`MISC/THM/...scr`), as JPEG,
+  about 530 to 560 KiB each. Opened as real 960x720 images (a frame of the scene, not a placeholder). The `.thm`
+  and embedded-EXIF fallbacks were not needed on this camera, so they are fixture-tested only.
+- `osmo get --sidecars` on a photo: `no sidecar`, the expected answer for a card that does not shoot JPEG+DNG; the
+  HEAD for the missing `.DNG` came back as a clean 404. A real DNG/WAV sidecar download is not yet verified live.
+- Not covered live: locating a file older than the newest page (this card has 14 files, so every file is on page 1).

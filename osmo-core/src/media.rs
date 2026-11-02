@@ -32,6 +32,29 @@ pub struct CameraFile {
 }
 
 impl CameraFile {
+    /// Unlisted files the camera may keep beside this one, same path with the extension swapped and on the
+    /// same store: a `.DNG` beside a still (JPEG+RAW mode) and a `.WAV` beside a clip (audio backup). These are
+    /// candidates only; the manifest never lists them, so ask the camera.
+    pub fn sidecar_paths(&self) -> Vec<String> {
+        let ext = if self.is_video() {
+            "WAV"
+        } else if matches!(self.ext.as_str(), "JPG" | "JPEG" | "HEIC") {
+            "DNG"
+        } else {
+            return Vec::new();
+        };
+        let name_start = self.path.rfind('/').map_or(0, |i| i + 1);
+        match self.path[name_start..].rfind('.') {
+            Some(dot) => vec![format!("{}.{ext}", &self.path[..name_start + dot])],
+            None => Vec::new(),
+        }
+    }
+
+    /// A video (as opposed to a still), by its stored upper-case extension.
+    pub fn is_video(&self) -> bool {
+        matches!(self.ext.as_str(), "MP4" | "MOV" | "OSV" | "INSV")
+    }
+
     /// A delete command can name this file safely: it has a verified handle that nobody else holds.
     pub fn deletable(&self) -> bool {
         self.handle != 0 && !self.handle_shared
@@ -43,7 +66,93 @@ impl CameraFile {
     }
 }
 
+/// The thumbnail (screennail) path the camera keeps for a media path: `DCIM/<dir>/<base>.<ext>` is
+/// `MISC/THM/<dir>/<base>.scr`.
+pub fn derive_thumb_path(path: &str) -> String {
+    let p = path.replacen("DCIM/", "MISC/THM/", 1);
+    let (dir, name) = p.rsplit_once('/').unwrap_or(("", &p));
+    let stem = name.rsplit_once('.').map_or(name, |(s, _)| s);
+    if dir.is_empty() {
+        format!("{stem}.scr")
+    } else {
+        format!("{dir}/{stem}.scr")
+    }
+}
+
 /// `/v2?storage=N&path=P`, the HTTP path of a file given only its store and camera path.
 pub fn url_path(storage: u8, path: &str) -> String {
     format!("/v2?storage={storage}&path={path}")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn file(path: &str, ext: &str) -> CameraFile {
+        CameraFile {
+            path: path.to_string(),
+            thumb_path: String::new(),
+            name: path.rsplit('/').next().unwrap().to_string(),
+            ext: ext.to_string(),
+            storage: 0,
+            size_bytes: 0,
+            handle: 0,
+            group: 0,
+            seq: 0,
+            cmd_handle: 0,
+            handle_candidate: 0,
+            handle_shared: false,
+            starred: false,
+        }
+    }
+
+    #[test]
+    fn is_video_covers_the_stored_upper_case_video_extensions() {
+        for e in ["MP4", "MOV", "OSV", "INSV"] {
+            assert!(file("DCIM/a/x", e).is_video(), "{e}");
+        }
+        for e in ["JPG", "DNG", "HEIC", ""] {
+            assert!(!file("DCIM/a/x", e).is_video(), "{e}");
+        }
+    }
+
+    #[test]
+    fn a_still_has_a_dng_sidecar_candidate_beside_it() {
+        assert_eq!(
+            file("DCIM/DJI_001/DJI_X_D.JPG", "JPG").sidecar_paths(),
+            vec!["DCIM/DJI_001/DJI_X_D.DNG"]
+        );
+        assert_eq!(
+            file("DCIM/DJI_001/DJI_X_D.HEIC", "HEIC").sidecar_paths(),
+            vec!["DCIM/DJI_001/DJI_X_D.DNG"]
+        );
+    }
+
+    #[test]
+    fn a_video_has_a_wav_sidecar_candidate_beside_it() {
+        assert_eq!(
+            file("DCIM/DJI_001/DJI_Y_D.MP4", "MP4").sidecar_paths(),
+            vec!["DCIM/DJI_001/DJI_Y_D.WAV"]
+        );
+    }
+
+    #[test]
+    fn a_dng_or_an_extensionless_file_has_no_sidecar_candidates() {
+        assert!(file("DCIM/DJI_001/DJI_X_D.DNG", "DNG")
+            .sidecar_paths()
+            .is_empty());
+        assert!(file("DCIM/DJI_001/DJI_X_D", "").sidecar_paths().is_empty());
+    }
+
+    #[test]
+    fn derive_thumb_path_swaps_the_dcim_root_and_the_extension() {
+        assert_eq!(
+            derive_thumb_path("DCIM/DJI_001/DJI_20260903165023_0012_D.JPG"),
+            "MISC/THM/DJI_001/DJI_20260903165023_0012_D.scr"
+        );
+        assert_eq!(
+            derive_thumb_path("DCIM/DJI_001/NOEXT"),
+            "MISC/THM/DJI_001/NOEXT.scr"
+        );
+    }
 }

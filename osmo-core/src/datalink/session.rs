@@ -615,6 +615,24 @@ impl<D: Datagram> CameraSession<D> {
         Ok(files)
     }
 
+    /// Find a file by its camera path, walking from the newest page back through older ones until it turns up or
+    /// the library is exhausted. Starts with a fresh listing, so call it on a session that has not listed yet.
+    pub fn find_file(&mut self, path: &str) -> Result<Option<CameraFile>, SessionError> {
+        if let Some(f) = self.list_newest()?.into_iter().find(|f| f.path == path) {
+            return Ok(Some(f));
+        }
+        while self.more_available() {
+            let next = self.list_next_page()?;
+            if next.is_empty() {
+                break;
+            }
+            if let Some(f) = next.into_iter().find(|f| f.path == path) {
+                return Ok(Some(f));
+            }
+        }
+        Ok(None)
+    }
+
     /// The next older page on the same session, returning only files not seen before; empty once the library is
     /// exhausted. A page that stays cut short is still returned (and flagged in `diagnostics().truncated`), and
     /// does not end the walk.

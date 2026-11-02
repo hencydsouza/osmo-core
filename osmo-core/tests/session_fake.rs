@@ -702,3 +702,57 @@ fn a_truncated_page_keeps_more_available_and_sets_the_flag() {
         "a truncated page is not the end of the library"
     );
 }
+
+#[test]
+fn find_file_walks_older_pages_until_it_finds_the_path() {
+    let page1 = manifest_frames(&fixture("oa4_45.bin"), 1);
+    let page2 = manifest_frames(&fixture("oa4_6.bin"), 1);
+    let on_page1: std::collections::HashSet<String> = decode_manifest(&fixture("oa4_45.bin"))
+        .into_iter()
+        .map(|f| f.path)
+        .collect();
+    let only_on_page2 = decode_manifest(&fixture("oa4_6.bin"))
+        .into_iter()
+        .find(|f| !on_page1.contains(&f.path))
+        .expect("page 2 has a new file")
+        .path;
+    let (cam, log) = FakeCamera::new(Box::new(move |ctr, n| match (ctr, n) {
+        (1, 0) => page1.clone(),
+        (1, 1) => page2.clone(),
+        _ => vec![],
+    }));
+    let mut s = session(cam);
+    let found = s
+        .find_file(&only_on_page2)
+        .unwrap()
+        .expect("found on the second page");
+    assert_eq!(found.path, only_on_page2);
+    assert_eq!(
+        sd_page_queries(&log).len(),
+        2,
+        "had to ask for the older page"
+    );
+}
+
+#[test]
+fn find_file_returns_none_after_exhausting_the_library_and_stops_early_when_found() {
+    let page1 = manifest_frames(&fixture("oa4_45.bin"), 1);
+    let first_path = decode_manifest(&fixture("oa4_45.bin")).remove(0).path;
+    let page2 = manifest_frames(&fixture("oa4_6.bin"), 1);
+    let (cam, log) = FakeCamera::new(Box::new(move |ctr, n| match (ctr, n) {
+        (1, 0) => page1.clone(),
+        (1, 1) => page2.clone(),
+        _ => vec![],
+    }));
+    let mut s = session(cam);
+    assert!(s.find_file(&first_path).unwrap().is_some());
+    assert_eq!(
+        sd_page_queries(&log).len(),
+        1,
+        "found on the newest page: no further query"
+    );
+    assert!(s
+        .find_file("DCIM/DJI_001/DOES_NOT_EXIST.MP4")
+        .unwrap()
+        .is_none());
+}
