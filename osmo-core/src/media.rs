@@ -32,6 +32,24 @@ pub struct CameraFile {
 }
 
 impl CameraFile {
+    /// Unlisted files the camera may keep beside this one, same path with the extension swapped and on the
+    /// same store: a `.DNG` beside a still (JPEG+RAW mode) and a `.WAV` beside a clip (audio backup). These are
+    /// candidates only; the manifest never lists them, so ask the camera.
+    pub fn sidecar_paths(&self) -> Vec<String> {
+        let ext = if self.is_video() {
+            "WAV"
+        } else if matches!(self.ext.as_str(), "JPG" | "JPEG" | "HEIC") {
+            "DNG"
+        } else {
+            return Vec::new();
+        };
+        let name_start = self.path.rfind('/').map_or(0, |i| i + 1);
+        match self.path[name_start..].rfind('.') {
+            Some(dot) => vec![format!("{}.{ext}", &self.path[..name_start + dot])],
+            None => Vec::new(),
+        }
+    }
+
     /// A video (as opposed to a still), by its stored upper-case extension.
     pub fn is_video(&self) -> bool {
         matches!(self.ext.as_str(), "MP4" | "MOV" | "OSV" | "INSV")
@@ -96,6 +114,34 @@ mod tests {
         for e in ["JPG", "DNG", "HEIC", ""] {
             assert!(!file("DCIM/a/x", e).is_video(), "{e}");
         }
+    }
+
+    #[test]
+    fn a_still_has_a_dng_sidecar_candidate_beside_it() {
+        assert_eq!(
+            file("DCIM/DJI_001/DJI_X_D.JPG", "JPG").sidecar_paths(),
+            vec!["DCIM/DJI_001/DJI_X_D.DNG"]
+        );
+        assert_eq!(
+            file("DCIM/DJI_001/DJI_X_D.HEIC", "HEIC").sidecar_paths(),
+            vec!["DCIM/DJI_001/DJI_X_D.DNG"]
+        );
+    }
+
+    #[test]
+    fn a_video_has_a_wav_sidecar_candidate_beside_it() {
+        assert_eq!(
+            file("DCIM/DJI_001/DJI_Y_D.MP4", "MP4").sidecar_paths(),
+            vec!["DCIM/DJI_001/DJI_Y_D.WAV"]
+        );
+    }
+
+    #[test]
+    fn a_dng_or_an_extensionless_file_has_no_sidecar_candidates() {
+        assert!(file("DCIM/DJI_001/DJI_X_D.DNG", "DNG")
+            .sidecar_paths()
+            .is_empty());
+        assert!(file("DCIM/DJI_001/DJI_X_D", "").sidecar_paths().is_empty());
     }
 
     #[test]

@@ -3,8 +3,8 @@ mod ble_btleplug;
 use clap::{Parser, Subcommand};
 use osmo_cli::listing::{
     dest_filename, download_error_message, file_from_path, fill_unknown_sizes, format_listing,
-    format_status, human_size, known_size, progress_line, thumb_sources, truncation_warning,
-    validate_get_path, ThumbSource,
+    format_status, human_size, known_size, progress_line, sidecars_to_fetch, thumb_sources,
+    truncation_warning, validate_get_path, ThumbSource,
 };
 use osmo_cli::{config, route::route_warning};
 use osmo_core::ble::{model_name, pair_and_read_wifi, PairOptions};
@@ -99,6 +99,9 @@ enum Cmd {
         /// to sleep when idle, and a long transfer has quiet gaps between the camera's periodic cuts.
         #[arg(long)]
         no_keepalive: bool,
+        /// Also fetch the unlisted `.DNG` beside a still or `.WAV` beside a clip, when the camera has one.
+        #[arg(long)]
+        sidecars: bool,
     },
 }
 
@@ -273,15 +276,25 @@ fn thumb_cmd(
     Ok(())
 }
 
-fn get_cmd(
-    path: &str,
-    out: &PathBuf,
-    ip: &str,
+#[derive(Clone, Copy)]
+struct GetOpts<'a> {
+    ip: &'a str,
     port: u16,
     storage: Option<u8>,
     keepalive: bool,
+    sidecars: bool,
     verbose: bool,
-) -> Result<(), String> {
+}
+
+fn get_cmd(path: &str, out: &PathBuf, opts: GetOpts) -> Result<(), String> {
+    let GetOpts {
+        ip,
+        port,
+        storage,
+        keepalive,
+        sidecars,
+        verbose,
+    } = opts;
     let path = validate_get_path(path)?;
     let http = HttpClient::new(ip);
     if verbose {
@@ -333,6 +346,31 @@ fn get_cmd(
     });
     let final_len = std::fs::metadata(&dest).map(|m| m.len()).unwrap_or(0);
     eprintln!("\r{}      ", progress_line(final_len, size));
+
+    // Sidecars ride the same held datalink, before it is released.
+    if sidecars && result.is_ok() {
+        let file = file_from_path(storage, path);
+        let found = sidecars_to_fetch(&file, &mut |u| http.head(u));
+        if found.is_empty() {
+            println!("no sidecar");
+        }
+        for (sidecar, n) in found {
+            let dest = out.join(dest_filename(&sidecar));
+            let mut last = Instant::now() - Duration::from_secs(1);
+            let r =
+                http.download_resumable(&url_path(storage, &sidecar), &dest, Some(n), &mut |d| {
+                    if last.elapsed() >= Duration::from_millis(250) {
+                        eprint!("\r{}      ", progress_line(d, Some(n)));
+                        last = Instant::now();
+                    }
+                });
+            eprintln!();
+            match r {
+                Ok(_) => println!("Saved sidecar {}", dest.display()),
+                Err(e) => eprintln!("sidecar {sidecar}: {}", download_error_message(&e)),
+            }
+        }
+    }
 
     if let Some(h) = bg {
         stop.store(true, Ordering::Relaxed);
@@ -398,7 +436,19 @@ fn run() -> Result<(), String> {
             port,
             storage,
             no_keepalive,
-        } => get_cmd(&path, &out, &ip, port, storage, !no_keepalive, cli.verbose),
+            sidecars,
+        } => get_cmd(
+            &path,
+            &out,
+            GetOpts {
+                ip: &ip,
+                port,
+                storage,
+                keepalive: !no_keepalive,
+                sidecars,
+                verbose: cli.verbose,
+            },
+        ),
         Cmd::Thumb {
             path,
             out,

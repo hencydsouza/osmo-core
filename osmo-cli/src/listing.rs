@@ -84,6 +84,18 @@ pub fn thumb_sources(f: &CameraFile) -> Vec<ThumbSource> {
     v
 }
 
+/// The sidecar candidates the camera actually has: each candidate's HTTP path is passed to `head`, which returns
+/// its size or `None` (a 404 means there is none, which is not an error).
+pub fn sidecars_to_fetch(
+    f: &CameraFile,
+    head: &mut dyn FnMut(&str) -> Option<u64>,
+) -> Vec<(String, u64)> {
+    f.sidecar_paths()
+        .into_iter()
+        .filter_map(|p| head(&osmo_core::media::url_path(f.storage, &p)).map(|n| (p, n)))
+        .collect()
+}
+
 /// A file known only by its store and camera path (the `--storage` shortcut skips the listing).
 pub fn file_from_path(storage: u8, path: &str) -> CameraFile {
     let name = path.rsplit('/').next().unwrap_or(path).to_string();
@@ -384,6 +396,30 @@ mod tests {
             "MISC/THM/DJI_001/DJI_20260903165023_0012_D.scr"
         );
         assert_eq!(f.name, "DJI_20260903165023_0012_D.JPG");
+    }
+
+    #[test]
+    fn sidecars_to_fetch_keeps_only_the_candidates_the_camera_has() {
+        let still = file_from_path(1, "DCIM/DJI_001/DJI_X_D.JPG");
+        let mut asked = vec![];
+        let have = sidecars_to_fetch(&still, &mut |url| {
+            asked.push(url.to_string());
+            Some(80_332_744)
+        });
+        assert_eq!(asked, vec!["/v2?storage=1&path=DCIM/DJI_001/DJI_X_D.DNG"]);
+        assert_eq!(
+            have,
+            vec![("DCIM/DJI_001/DJI_X_D.DNG".to_string(), 80_332_744)]
+        );
+        assert!(
+            sidecars_to_fetch(&still, &mut |_| None).is_empty(),
+            "a 404 means none, and is not an error"
+        );
+        let video = file_from_path(0, "DCIM/DJI_001/DJI_Y_D.MP4");
+        assert_eq!(
+            sidecars_to_fetch(&video, &mut |_| Some(925_740)),
+            vec![("DCIM/DJI_001/DJI_Y_D.WAV".to_string(), 925_740)]
+        );
     }
 
     #[test]
