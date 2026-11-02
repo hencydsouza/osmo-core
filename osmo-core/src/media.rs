@@ -22,6 +22,11 @@ pub struct CameraFile {
 impl CameraFile {
     /// Path of the original on the camera's HTTP file API. The path is deliberately not percent-encoded.
     pub fn url_path(&self) -> String {
-        format!("/v2?storage={}&path={}", self.storage, self.path)
+        url_path(self.storage, &self.path)
     }
+}
+
+/// `/v2?storage=N&path=P`, the HTTP path of a file given only its store and camera path.
+pub fn url_path(storage: u8, path: &str) -> String {
+    format!("/v2?storage={storage}&path={path}")
 }
