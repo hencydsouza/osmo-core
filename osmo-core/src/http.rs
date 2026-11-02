@@ -2,6 +2,7 @@
 //! `HttpClient.kt` / `MediaDownloader.downloadOne`. The camera closes long transfers every ~10 s and
 //! answers 404/500 when merely busy, so a download is a loop of ranged requests that only gives up
 //! after several attempts in a row move no bytes.
+use std::cell::RefCell;
 use std::fs::OpenOptions;
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::Path;
@@ -58,9 +59,12 @@ impl Default for RetryPolicy {
     }
 }
 
+type Logger = Box<dyn FnMut(&str) + Send>;
+
 pub struct HttpClient {
     base: String,
     pub policy: RetryPolicy,
+    logger: RefCell<Option<Logger>>,
 }
 
 fn agent() -> ureq::Agent {
@@ -80,6 +84,18 @@ impl HttpClient {
         HttpClient {
             base: base.trim_end_matches('/').to_string(),
             policy: RetryPolicy::default(),
+            logger: RefCell::new(None),
+        }
+    }
+
+    /// Receive one line per download attempt (offset, outcome, bytes on disk, backoff).
+    pub fn set_logger(&self, f: impl FnMut(&str) + Send + 'static) {
+        *self.logger.borrow_mut() = Some(Box::new(f));
+    }
+
+    fn log(&self, msg: String) {
+        if let Some(l) = self.logger.borrow_mut().as_mut() {
+            l(&msg);
         }
     }
 
@@ -176,6 +192,10 @@ impl HttpClient {
                 file.set_len(0)?;
                 after = 0;
             }
+            self.log(format!(
+                "download: attempt {} from {offset}: {outcome:?}, file now {after} bytes",
+                attempt + 1
+            ));
             if outcome == Fetch::Done || (remote > 0 && after >= remote) {
                 return Ok(Outcome::Saved);
             }
@@ -184,7 +204,15 @@ impl HttpClient {
                 return Err(DownloadError::Stalled { at: after });
             }
             attempt += 1;
-            std::thread::sleep(self.policy.backoff * barren.max(1));
+            let pause = self.policy.backoff * barren.max(1);
+            if barren > 0 {
+                self.log(format!(
+                    "download: no progress {barren}/{}, retrying in {} ms",
+                    self.policy.max_barren,
+                    pause.as_millis()
+                ));
+            }
+            std::thread::sleep(pause);
             offset = after;
         }
     }

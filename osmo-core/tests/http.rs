@@ -306,3 +306,30 @@ fn cut_connection_is_detected_even_when_the_remote_size_is_unknown() {
         "a short body must not be taken as complete"
     );
 }
+
+#[test]
+fn download_attempts_are_logged_so_a_dropped_hotspot_is_diagnosable() {
+    let body = data(20_000);
+    let srv = serve(vec![
+        Reply::cut(&body[..8000], 20_000),
+        Reply::status(500),
+        Reply::partial(&body[8000..], 8000, 20_000),
+    ]);
+    let dest = tempfile::tempdir().unwrap().keep().join("a.mp4");
+    let c = client(&srv);
+    let lines: Arc<Mutex<Vec<String>>> = Arc::default();
+    let sink = lines.clone();
+    c.set_logger(move |l| sink.lock().unwrap().push(l.to_string()));
+    c.download_resumable(P, &dest, Some(20_000), &mut |_| {})
+        .unwrap();
+    let text = lines.lock().unwrap().join("\n");
+    for want in [
+        "attempt 1 from 0: Interrupted",
+        "file now 8000",
+        "attempt 2 from 8000: Failed",
+        "no progress 1/",
+        "attempt 3 from 8000: Done",
+    ] {
+        assert!(text.contains(want), "missing {want:?} in:\n{text}");
+    }
+}

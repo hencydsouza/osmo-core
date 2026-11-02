@@ -72,3 +72,17 @@ sizes only; the raw dump also contains device status frames and is not committed
 Remaining oddity, understood: four videos (316 to 817 s long, the longest on the card) carry a size of 0 in
 the manifest, so `ls` and `get` now ask the camera for the size over HTTP (the same fallback Osmosis uses).
 That HEAD request is not yet verified live.
+
+## HW-2: sizes, a 4.1 GiB download, and the hotspot dropping (2026-11-03)
+
+- **HTTP size fallback: live-verified.** The four videos with a manifest size of 0 now list 10.7, 5.2, 4.1 and
+  6.9 GiB.
+- **4.1 GiB video: live-verified** (completed over several resumes: interrupted by Ctrl-C at 23%, then
+  stalled at 58% and 90%).
+- **Finding:** each stall was followed by the camera's WiFi disappearing; `osmo wifi` and a rejoin were needed
+  each time. This run used the old default (datalink closed after the lookup). Likely cause: the camera cuts a
+  long transfer periodically and then answers "busy" for a few retries, and those quiet gaps exceed the AP's
+  ~10 s idle limit. Osmosis holds the AP up with a datalink heartbeat for the whole transfer.
+- **Change:** `get` now holds the datalink open by default (`--no-keepalive` to disable), logs each download
+  attempt with `-v`, and a stalled download now says how to wake the camera and resume.
+  Not yet re-verified live.

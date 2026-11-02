@@ -2,8 +2,8 @@ mod ble_btleplug;
 
 use clap::{Parser, Subcommand};
 use osmo_cli::listing::{
-    dest_filename, fill_unknown_sizes, find_file, format_listing, known_size, progress_line,
-    validate_get_path,
+    dest_filename, download_error_message, fill_unknown_sizes, find_file, format_listing,
+    known_size, progress_line, validate_get_path,
 };
 use osmo_cli::{config, route::route_warning};
 use osmo_core::ble::{model_name, pair_and_read_wifi, PairOptions};
@@ -67,12 +67,14 @@ enum Cmd {
         ip: String,
         #[arg(long, default_value_t = 9004)]
         port: u16,
-        /// Skip the listing and fetch by path from this store (0 = SD card, 1 = internal).
+        /// Skip the listing and fetch by path from this store (0 = SD card, 1 = internal). This opens no datalink,
+        /// so nothing holds the camera's WiFi up.
         #[arg(long)]
         storage: Option<u8>,
-        /// Keep the datalink alive while downloading, in case the camera drops its WiFi when idle.
+        /// Don't hold the datalink open while downloading. By default it is held: the camera puts its WiFi
+        /// to sleep when idle, and a long transfer has quiet gaps between the camera's periodic cuts.
         #[arg(long)]
-        keepalive: bool,
+        no_keepalive: bool,
     },
 }
 
@@ -159,6 +161,9 @@ fn get_cmd(
 ) -> Result<(), String> {
     let path = validate_get_path(path)?;
     let http = HttpClient::new(ip);
+    if verbose {
+        http.set_logger(|l| eprintln!("  {l}"));
+    }
     let (storage, size, session) = match storage {
         Some(s) => {
             warn_route(ip, port);
@@ -213,7 +218,7 @@ fn get_cmd(
             s.close();
         }
     }
-    match result.map_err(|e| e.to_string())? {
+    match result.map_err(|e| download_error_message(&e))? {
         Outcome::Saved => println!("Saved {}", dest.display()),
         Outcome::AlreadyComplete => println!("Already complete: {}", dest.display()),
     }
@@ -264,8 +269,8 @@ fn run() -> Result<(), String> {
             ip,
             port,
             storage,
-            keepalive,
-        } => get_cmd(&path, &out, &ip, port, storage, keepalive, cli.verbose),
+            no_keepalive,
+        } => get_cmd(&path, &out, &ip, port, storage, !no_keepalive, cli.verbose),
         ble_cmd => {
             let rt = Arc::new(Runtime::new().map_err(|e| e.to_string())?);
             let adapter = ble_btleplug::adapter(&rt)?;

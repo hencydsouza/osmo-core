@@ -27,8 +27,10 @@ osmo ls                       # list the newest media (needs the camera's WiFi)
 osmo get DCIM/100MEDIA/DJI_20260101_0001_D.MP4 -o ~/Movies/osmo
 ```
 
-`get` takes the path exactly as `ls` prints it and resumes a partial file. If the camera drops its WiFi while
-idle, add `--keepalive`.
+`get` takes the path exactly as `ls` prints it and resumes a partial file. It holds the datalink open while
+downloading, because the camera puts its WiFi to sleep when idle (`--no-keepalive` turns that off, and
+`--storage` skips the datalink entirely). If the WiFi still drops, run `osmo wifi`, rejoin, and re-run the same
+`get` command: it resumes. `-v` logs every download attempt.
 
 macOS: your terminal needs Bluetooth permission (System Settings > Privacy & Security > Bluetooth).
 

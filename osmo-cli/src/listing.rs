@@ -32,6 +32,16 @@ pub fn progress_line(done: u64, total: Option<u64>) -> String {
     }
 }
 
+/// What to tell the user when a download gave up. A stall is nearly always the camera's WiFi going to sleep.
+pub fn download_error_message(e: &osmo_core::http::DownloadError) -> String {
+    match e {
+        osmo_core::http::DownloadError::Stalled { .. } => format!(
+            "{e}\nThe camera's WiFi may have gone to sleep: run `osmo wifi`, rejoin it, then run the same command again to resume."
+        ),
+        other => other.to_string(),
+    }
+}
+
 /// The manifest's size, or (when it is 0, as for the longest videos) whatever the camera reports over HTTP.
 pub fn known_size(f: &CameraFile, head: impl FnOnce() -> Option<u64>) -> Option<u64> {
     if f.size_bytes > 0 {
@@ -170,6 +180,21 @@ mod tests {
         let z = file("DCIM/DJI_001/B.MP4", 0, 0);
         assert_eq!(known_size(&z, || Some(7)), Some(7));
         assert_eq!(known_size(&z, || None), None);
+    }
+
+    #[test]
+    fn a_stalled_download_tells_the_user_how_to_wake_the_camera_and_resume() {
+        let m =
+            download_error_message(&osmo_core::http::DownloadError::Stalled { at: 2_590_527_922 });
+        assert!(m.contains("2590527922"), "{m}");
+        assert!(m.contains("osmo wifi") && m.contains("resume"), "{m}");
+        let io = download_error_message(&osmo_core::http::DownloadError::Io(
+            std::io::Error::other("disk full"),
+        ));
+        assert!(
+            io.contains("disk full") && !io.contains("osmo wifi"),
+            "{io}"
+        );
     }
 
     #[test]
