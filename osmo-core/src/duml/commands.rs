@@ -35,7 +35,14 @@ pub const APP_DEVICE_INFO: [u8; 62] = {
 pub fn new_install_identity() -> String {
     let b: [u8; 16] = rand::random();
     let h = |r: std::ops::Range<usize>| b[r].iter().map(|x| format!("{x:02x}")).collect::<String>();
-    format!("{}-{}-{}-{}-{}", h(0..4), h(4..6), h(6..8), h(8..10), h(10..14))
+    format!(
+        "{}-{}-{}-{}-{}",
+        h(0..4),
+        h(4..6),
+        h(6..8),
+        h(8..10),
+        h(10..14)
+    )
 }
 
 fn ty(set: u8, cmd: u8) -> u32 {
@@ -44,7 +51,13 @@ fn ty(set: u8, cmd: u8) -> u32 {
 
 /// Generic request (`flags 0x40`) to an arbitrary command set/id.
 pub fn command(set: u8, cmd: u8, payload: &[u8], target: u16, id: u16) -> Vec<u8> {
-    Frame { target, id, ty: ty(set, cmd), payload: payload.to_vec() }.encode()
+    Frame {
+        target,
+        id,
+        ty: ty(set, cmd),
+        payload: payload.to_vec(),
+    }
+    .encode()
 }
 
 /// SetPairingPIN (`0x07/0x45`): `PackString(identifier) + PackString(pin)`.
@@ -74,11 +87,20 @@ mod tests {
     use super::*;
 
     fn hex(s: &str) -> Vec<u8> {
-        (0..s.len()).step_by(2).map(|i| u8::from_str_radix(&s[i..i + 2], 16).unwrap()).collect()
+        (0..s.len())
+            .step_by(2)
+            .map(|i| u8::from_str_radix(&s[i..i + 2], 16).unwrap())
+            .collect()
     }
-    fn sender(f: &[u8]) -> u8 { f[4] }
-    fn receiver(f: &[u8]) -> u8 { f[5] }
-    fn payload(f: &[u8]) -> &[u8] { &f[11..f.len() - 2] }
+    fn sender(f: &[u8]) -> u8 {
+        f[4]
+    }
+    fn receiver(f: &[u8]) -> u8 {
+        f[5]
+    }
+    fn payload(f: &[u8]) -> &[u8] {
+        &f[11..f.len() - 2]
+    }
 
     #[test]
     fn pairing_frame_matches_doc() {
@@ -90,9 +112,18 @@ mod tests {
 
     #[test]
     fn wifi_getters_match_docs() {
-        assert_eq!(wifi_query(CMD_WIFI_SSID, &[], 0xA000), hex("550d0433020700a04007077472"));
-        assert_eq!(wifi_query(CMD_WIFI_PASSWORD, &[], 0xA000), hex("550d0433020700a040070eb5ef"));
-        assert_eq!(wifi_query(CMD_WIFI_MAC, &[], 0xA000), hex("550d0433020700a040070ca7cc"));
+        assert_eq!(
+            wifi_query(CMD_WIFI_SSID, &[], 0xA000),
+            hex("550d0433020700a04007077472")
+        );
+        assert_eq!(
+            wifi_query(CMD_WIFI_PASSWORD, &[], 0xA000),
+            hex("550d0433020700a040070eb5ef")
+        );
+        assert_eq!(
+            wifi_query(CMD_WIFI_MAC, &[], 0xA000),
+            hex("550d0433020700a040070ca7cc")
+        );
     }
 
     #[test]
@@ -104,7 +135,10 @@ mod tests {
         assert_eq!(receiver(&f) & 0x1F, 0x10);
         assert_eq!(receiver(&f) >> 5, 7);
         assert_eq!(payload(&f), &[4, 0]);
-        assert_eq!(session_ping(&SESSION_KEEPALIVE, 0xCB1B), hex("550f04a202f01bcb40002b0101abd6"));
+        assert_eq!(
+            session_ping(&SESSION_KEEPALIVE, 0xCB1B),
+            hex("550f04a202f01bcb40002b0101abd6")
+        );
     }
 
     #[test]

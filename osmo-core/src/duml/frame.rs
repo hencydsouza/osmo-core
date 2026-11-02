@@ -95,30 +95,53 @@ mod tests {
     use super::*;
 
     fn hex(s: &str) -> Vec<u8> {
-        (0..s.len()).step_by(2).map(|i| u8::from_str_radix(&s[i..i + 2], 16).unwrap()).collect()
+        (0..s.len())
+            .step_by(2)
+            .map(|i| u8::from_str_radix(&s[i..i + 2], 16).unwrap())
+            .collect()
     }
 
     #[test]
     fn session_wake_frame_matches_doc() {
-        let f = Frame { target: 0xF002, id: 0xCB1B, ty: 0x2B0040, payload: vec![4, 0] };
+        let f = Frame {
+            target: 0xF002,
+            id: 0xCB1B,
+            ty: 0x2B0040,
+            payload: vec![4, 0],
+        };
         assert_eq!(f.encode(), hex("550f04a202f01bcb40002b04009ab9"));
     }
 
     #[test]
     fn session_keepalive_frame_matches_doc() {
-        let f = Frame { target: 0xF002, id: 0xCB1B, ty: 0x2B0040, payload: vec![1, 1] };
+        let f = Frame {
+            target: 0xF002,
+            id: 0xCB1B,
+            ty: 0x2B0040,
+            payload: vec![1, 1],
+        };
         assert_eq!(f.encode(), hex("550f04a202f01bcb40002b0101abd6"));
     }
 
     #[test]
     fn roundtrip() {
-        let f = Frame { target: 0x0702, id: 0x1234, ty: 0x112233, payload: vec![1, 2, 3] };
+        let f = Frame {
+            target: 0x0702,
+            id: 0x1234,
+            ty: 0x112233,
+            payload: vec![1, 2, 3],
+        };
         assert_eq!(Frame::decode(&f.encode()).unwrap(), f);
     }
 
     #[test]
     fn type_accessors() {
-        let f = Frame { target: 0x0702, id: 1, ty: 0x450740, payload: vec![] };
+        let f = Frame {
+            target: 0x0702,
+            id: 1,
+            ty: 0x450740,
+            payload: vec![],
+        };
         assert_eq!((f.flags(), f.cmd_set(), f.cmd_id()), (0x40, 0x07, 0x45));
     }
 
@@ -126,7 +149,13 @@ mod tests {
     fn pair_message_is_51_bytes() {
         let mut payload = pack_string("284ae5b8d76b3375a04a6417ad71bea3");
         payload.extend(pack_string("osmo"));
-        let bytes = Frame { target: 0x0702, id: 0x8092, ty: 0x450740, payload }.encode();
+        let bytes = Frame {
+            target: 0x0702,
+            id: 0x8092,
+            ty: 0x450740,
+            payload,
+        }
+        .encode();
         assert_eq!(bytes.len(), 51);
         assert_eq!(bytes[1], 51);
         assert_eq!(bytes[2], 0x04);
@@ -134,7 +163,13 @@ mod tests {
 
     #[test]
     fn decode_rejects_bad_crc() {
-        let mut b = Frame { target: 1, id: 2, ty: 3, payload: vec![9] }.encode();
+        let mut b = Frame {
+            target: 1,
+            id: 2,
+            ty: 3,
+            payload: vec![9],
+        }
+        .encode();
         let n = b.len();
         b[n - 1] ^= 0xFF;
         assert_eq!(Frame::decode(&b), Err(FrameError::BadCrc));
@@ -142,14 +177,26 @@ mod tests {
 
     #[test]
     fn decode_rejects_corrupt_header() {
-        let mut b = Frame { target: 1, id: 2, ty: 3, payload: vec![9] }.encode();
+        let mut b = Frame {
+            target: 1,
+            id: 2,
+            ty: 3,
+            payload: vec![9],
+        }
+        .encode();
         b[2] = 0x05;
         assert!(Frame::decode(&b).is_err());
     }
 
     #[test]
     fn decode_rejects_wrong_length() {
-        let b = Frame { target: 1, id: 2, ty: 3, payload: vec![9, 9] }.encode();
+        let b = Frame {
+            target: 1,
+            id: 2,
+            ty: 3,
+            payload: vec![9, 9],
+        }
+        .encode();
         assert_eq!(Frame::decode(&b[..b.len() - 1]), Err(FrameError::BadLength));
     }
 

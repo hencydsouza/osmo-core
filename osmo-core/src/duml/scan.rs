@@ -22,7 +22,11 @@ pub fn scan_frames(raw: &[u8]) -> Vec<Scanned> {
             continue;
         }
         let len = frame_len(raw, i);
-        if raw[i + 2] >> 2 != 1 || len < 13 || i + len > raw.len() || crc8(&raw[i..i + 3]) != raw[i + 3] {
+        if raw[i + 2] >> 2 != 1
+            || len < 13
+            || i + len > raw.len()
+            || crc8(&raw[i..i + 3]) != raw[i + 3]
+        {
             i += 1;
             continue;
         }
@@ -31,7 +35,11 @@ pub fn scan_frames(raw: &[u8]) -> Vec<Scanned> {
             i += 1;
             continue;
         }
-        out.push(Scanned { set: raw[i + 9], cmd: raw[i + 10], payload: raw[i + 11..i + len - 2].to_vec() });
+        out.push(Scanned {
+            set: raw[i + 9],
+            cmd: raw[i + 10],
+            payload: raw[i + 11..i + len - 2].to_vec(),
+        });
         i += 1;
     }
     out
@@ -96,7 +104,13 @@ mod tests {
     use crate::duml::Frame;
 
     fn frame(set: u8, cmd: u8, payload: Vec<u8>) -> Vec<u8> {
-        Frame { target: 0x0201, id: 1, ty: 0x40 | (set as u32) << 8 | (cmd as u32) << 16, payload }.encode()
+        Frame {
+            target: 0x0201,
+            id: 1,
+            ty: 0x40 | (set as u32) << 8 | (cmd as u32) << 16,
+            payload,
+        }
+        .encode()
     }
 
     #[test]
@@ -109,7 +123,10 @@ mod tests {
         raw.extend([0xCC]);
         let got = scan_frames(&raw);
         assert_eq!(got.len(), 1);
-        assert_eq!((got[0].set, got[0].cmd, got[0].payload.len()), (0x00, 0x27, 300));
+        assert_eq!(
+            (got[0].set, got[0].cmd, got[0].payload.len()),
+            (0x00, 0x27, 300)
+        );
     }
 
     #[test]
@@ -125,7 +142,10 @@ mod tests {
         let mut raw = frame(0x00, 0x27, vec![1]);
         raw.extend(frame(0x02, 0x80, vec![2, 3]));
         let got = scan_frames(&raw);
-        assert_eq!(got.iter().map(|s| (s.set, s.cmd)).collect::<Vec<_>>(), vec![(0, 0x27), (2, 0x80)]);
+        assert_eq!(
+            got.iter().map(|s| (s.set, s.cmd)).collect::<Vec<_>>(),
+            vec![(0, 0x27), (2, 0x80)]
+        );
     }
 
     #[test]
@@ -142,7 +162,13 @@ mod tests {
 
     #[test]
     fn find_resp_status_reads_first_word() {
-        assert_eq!(find_resp_status(&frame(0x00, 0x28, vec![0x34, 0x12]), 0x00, 0x28), Some(0x1234));
-        assert_eq!(find_resp_status(&frame(0x00, 0x28, vec![]), 0x00, 0x28), Some(0));
+        assert_eq!(
+            find_resp_status(&frame(0x00, 0x28, vec![0x34, 0x12]), 0x00, 0x28),
+            Some(0x1234)
+        );
+        assert_eq!(
+            find_resp_status(&frame(0x00, 0x28, vec![]), 0x00, 0x28),
+            Some(0)
+        );
     }
 }
