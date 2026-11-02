@@ -1,0 +1,7 @@
+osmo-core ports protocol knowledge and test fixtures from other projects:
+
+- Osmosis by Konrad Iturbe (MIT) - https://github.com/KonradIT/osmosis
+  Protocol behaviour, DUML datalink handling, manifest decoding, and the golden
+  manifest fixtures under osmo-core/tests/fixtures/.
+- dimadesu/dji-remote (MIT) - DUML framing, CRCs (via Osmosis).
+- xaionaro-go/djictl (CC0-1.0) - livestream frames (not used yet).
