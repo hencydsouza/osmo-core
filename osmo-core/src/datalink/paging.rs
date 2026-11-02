@@ -79,11 +79,20 @@ pub fn store_has_older_page(
 }
 
 /// The oldest usable handle in `store`'s slice of `page` that is strictly below `below`. Handle 0 means
-/// "no handle", not a very old file: taking it would park the cursor at the bottom forever.
+/// "no handle", not a very old file: taking it would park the cursor at the bottom forever. A still whose
+/// handle was never verified (a page with fewer than two handles cannot be fitted) falls back to its candidate:
+/// paging only reads, so one source is enough here, unlike delete, which still needs the verified handle.
 pub fn oldest_handle(page: &[CameraFile], store: u8, below: u32) -> Option<u32> {
     page.iter()
-        .filter(|f| f.storage == store && f.handle != 0 && f.handle < below)
-        .map(|f| f.handle)
+        .filter(|f| f.storage == store)
+        .map(|f| {
+            if f.handle != 0 {
+                f.handle
+            } else {
+                f.handle_candidate
+            }
+        })
+        .filter(|&h| h != 0 && h < below)
         .min()
 }
 
@@ -289,6 +298,37 @@ mod tests {
             oldest_handle(&page, 0, 0x40050),
             None,
             "strictly below the current cursor"
+        );
+    }
+
+    #[test]
+    fn a_page_of_stills_with_no_verified_handles_still_advances_from_their_candidates() {
+        // A page with no video has fewer than two handles, so the list cannot be fitted and no still is
+        // promoted. Paging only reads, so the candidate (the value at the record's fixed position) is enough.
+        let mut a = file(0, 0, "DCIM/a/1.JPG");
+        a.handle_candidate = 0x40050;
+        let mut b = file(0, 0, "DCIM/a/2.JPG");
+        b.handle_candidate = 0x40040;
+        let page = vec![a, b];
+        assert_eq!(oldest_handle(&page, 0, u32::MAX), Some(0x40040));
+        let step = step_pagination(
+            0x40060,
+            NEWEST_INTERNAL,
+            &page,
+            &mut HashSet::new(),
+            &HashMap::new(),
+            2,
+        );
+        assert_eq!(
+            step.sd_cursor, 0x40040,
+            "the cursor moved, so a full page means there is more"
+        );
+        assert!(step.more_available);
+        let (sd, _, more) = seed_cursors(&page, &HashMap::new(), 2);
+        assert_eq!((sd, more), (0x40040, true));
+        assert!(
+            page.iter().all(|f| !f.deletable()),
+            "...and none of them became deletable"
         );
     }
 

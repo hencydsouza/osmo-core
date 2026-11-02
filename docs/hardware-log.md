@@ -94,3 +94,17 @@ With the datalink held open (the new default), a 5.2 GiB video downloaded in a s
 manifest size. The `0x53/0x10` wake also brought the AP up on every `osmo wifi` run since it was added
 (about five, plus the earlier 2.0 GiB run). Not yet tested: a card with no files, Bluetooth off, and a
 multi-attempt download *with* keepalive (no cuts happened in either keepalive run).
+
+## HW-A: paging and live status (2026-11-03) - live-verified
+
+- `osmo ls` printed the same 14 files plus a status line (`battery 33%  SD 87.0 GiB free of 119.1 GiB`). The
+  owner has not yet compared the numbers against the camera's own screen.
+- `osmo -v ls --all --page-size 5` returned the same 14 files in the same order, with no truncation warning, over
+  four page queries returning 5, 4, 4 and 1 new files. The cursor is inclusive, so each later page repeats the
+  boundary file; the dedupe by (store, path) handled it. Paging worked inline on the live session, so no
+  fresh-session fallback was needed.
+- Finding: on the last page only one record was a video, so the list could not be fitted and the cursor did not move.
+  A page of only photos would have stopped `ls --all` silently at the first page. Fixed test-first: paging cursors
+  fall back to a still's own handle candidate (paging only reads; delete still requires the verified handle).
+- Not covered live: internal-store paging (the Action 4 has none), a genuinely cut-short page (fixture-tested
+  only), and a card with more than one default-size page (this card has 14 files).
