@@ -117,3 +117,14 @@ multi-attempt download *with* keepalive (no cuts happened in either keepalive ru
 - `osmo get --sidecars` on a photo: `no sidecar`, the expected answer for a card that does not shoot JPEG+DNG; the
   HEAD for the missing `.DNG` came back as a clean 404. A real DNG/WAV sidecar download is not yet verified live.
 - Not covered live: locating a file older than the newest page (this card has 14 files, so every file is on page 1).
+
+## HW-C: favourite on and off (2026-11-03) - partly live-verified, one bug found
+
+- Star on: the camera accepted it, a fresh listing confirmed it, and `ls` showed the star. Live-verified.
+- A run before the owner had joined the camera's WiFi failed cleanly with the route warning and the "join the
+  camera's WiFi" message. Live-verified error path.
+- Star off: acknowledged (status 0) twice, in separate runs, yet the star never cleared in any later listing.
+- Cause: each `osmo` run started its write counter at 1, and the camera treats a repeated counter as a repeat
+  (acknowledge, do nothing); Osmosis's own tests note the counter "has to advance". The same bug would have made
+  every delete after the first silently do nothing. Fixed test-first: one shared write counter, persisted by the
+  CLI and seeded from the clock so it cannot collide with counters used earlier. Not yet re-verified live.

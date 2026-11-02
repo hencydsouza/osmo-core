@@ -237,7 +237,11 @@ fn star_cmd(path: &str, on: bool, ip: &str, port: u16, verbose: bool) -> Result<
             "not found anywhere in the camera's library: check the path against `osmo ls --all`",
         )?;
         eprintln!("Sending favourite {} ...", if on { "on" } else { "off" });
-        sess.set_favourite(&file, on).map_err(|e| e.to_string())?;
+        sess.set_write_counter_start(config::next_write_counter());
+        let result = sess.set_favourite(&file, on);
+        // Advance the persisted counter whatever happened: the camera may have seen this one.
+        let _ = config::save_write_counter(sess.next_write_counter());
+        result.map_err(|e| e.to_string())?;
         println!(
             "The camera accepted it: {path} {}",
             if on {

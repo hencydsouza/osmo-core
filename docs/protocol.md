@@ -28,6 +28,11 @@ BLE pair -> read WiFi credentials -> (user joins the camera's WiFi) -> TCP-7001 
 - **Waking the AP:** the camera's WiFi AP sleeps when idle. `0x53/0x10 00 00 00 00` to receiver type 0x1C (not
   the camera) after pairing brings it up (about 15 s; live-verified on an Action 4 across several wake-and-join runs).
   Holding it up afterwards needs traffic: a datalink session, an HTTP transfer, or a ~10 s heartbeat.
+- **Write counters must advance across sessions.** Favourite and delete carry a per-request counter; the camera treats
+  a repeated counter as a repeat and acknowledges (status 0) without acting. Seen live: an un-favourite right after a
+  favourite, both counter 1 from two separate runs, was acknowledged and ignored. One sequence is shared by all
+  writes; a caller that makes one session per run must persist `next_write_counter()` and restart from it
+  (`set_write_counter_start`); the CLI seeds from the clock and persists it.
 - **Pairing identity:** 32 chars, minted once and persisted. A new one per run re-prompts on the camera.
 - **Datalink sequencing:** every packet carries `[ack = my previous seq][my seq]` in our own sequence space, and
   the 34-byte window ack echoes the peer's own cursors. Wrong values here silently drop writes while reads keep

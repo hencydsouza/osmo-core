@@ -898,3 +898,25 @@ fn a_write_outside_playback_is_refused_without_sending() {
     ));
     assert!(favourite_frames(&log).is_empty());
 }
+
+#[test]
+fn the_write_counter_can_continue_a_sequence_from_an_earlier_process() {
+    // The camera treats a repeated counter as a repeat and acknowledges without acting, so a new process
+    // must continue where the last one stopped.
+    let (mut s, log, file) = writable(Some(vec![0x00]), Playback::Works, Timing::fast());
+    s.set_write_counter_start(41);
+    s.set_favourite(&file, true).unwrap();
+    s.set_favourite(&file, false).unwrap();
+    assert_eq!(
+        favourite_frames(&log),
+        vec![
+            favourite_payload(file.cmd_handle, 41, true),
+            favourite_payload(file.cmd_handle, 42, false)
+        ]
+    );
+    assert_eq!(
+        s.next_write_counter(),
+        43,
+        "the caller persists this for the next run"
+    );
+}

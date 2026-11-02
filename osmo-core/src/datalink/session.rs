@@ -235,7 +235,7 @@ pub struct CameraSession<D: Datagram> {
     last_slices: HashMap<u8, SliceInfo>,
     truncated: bool,
     registered_at: Option<Instant>,
-    fav_counter: u32,
+    write_counter: u32,
 }
 
 impl CameraSession<UdpPeer> {
@@ -277,7 +277,7 @@ impl<D: Datagram> CameraSession<D> {
             last_slices: HashMap::new(),
             truncated: false,
             registered_at: None,
-            fav_counter: 1,
+            write_counter: 1,
         }
     }
 
@@ -630,6 +630,20 @@ impl<D: Datagram> CameraSession<D> {
         Ok(files)
     }
 
+    /// Continue the write counter sequence from an earlier process. Every write carries a per-request counter, and
+    /// the camera treats a repeated one as a repeat: it acknowledges and does nothing (an un-favourite right
+    /// after a favourite, both with counter 1, was ignored on a real Action 4). One sequence is shared by every
+    /// kind of write; a caller that makes one session per run must persist `next_write_counter()` and pass it
+    /// here next time, starting above anything it used before.
+    pub fn set_write_counter_start(&mut self, n: u32) {
+        self.write_counter = n;
+    }
+
+    /// The counter the next write will use.
+    pub fn next_write_counter(&self) -> u32 {
+        self.write_counter
+    }
+
     /// How long ago this session finished registering; a write is only attempted while this is within
     /// `Timing.write_window`.
     pub fn session_age(&self) -> Duration {
@@ -681,8 +695,8 @@ impl<D: Datagram> CameraSession<D> {
             return Err(WriteError::NoHandle);
         }
         self.write_guard()?;
-        let counter = self.fav_counter;
-        self.fav_counter += 1;
+        let counter = self.write_counter;
+        self.write_counter = self.write_counter.wrapping_add(1);
         self.send(
             0x02,
             0xBF,
