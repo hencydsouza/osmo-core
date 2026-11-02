@@ -377,3 +377,33 @@ fn a_416_on_a_resume_means_the_file_is_already_complete() {
         "one request, no stall loop"
     );
 }
+
+#[test]
+fn get_bytes_returns_the_body_or_none_on_404() {
+    let srv = serve(vec![Reply::ok(b"thumbnail-bytes"), Reply::status(404)]);
+    let c = client(&srv);
+    assert_eq!(c.get_bytes(P), Some(b"thumbnail-bytes".to_vec()));
+    assert_eq!(c.get_bytes(P), None);
+}
+
+#[test]
+fn get_range_sends_an_inclusive_range_header_and_accepts_206() {
+    let srv = serve(vec![Reply::partial(&data(1024), 0, 70_000)]);
+    let got = client(&srv).get_range(P, 0, 65_535).unwrap();
+    assert_eq!(got.len(), 1024);
+    assert_eq!(
+        srv.reqs.lock().unwrap()[0].range.as_deref(),
+        Some("bytes=0-65535")
+    );
+}
+
+#[test]
+fn get_range_reads_at_most_the_requested_length_even_if_the_server_ignores_the_range() {
+    let srv = serve(vec![Reply::ok(&data(100_000))]);
+    let got = client(&srv).get_range(P, 0, 1023).unwrap();
+    assert_eq!(
+        got.len(),
+        1024,
+        "a camera answering 200 with the whole file must not be read in full"
+    );
+}

@@ -2,12 +2,14 @@ mod ble_btleplug;
 
 use clap::{Parser, Subcommand};
 use osmo_cli::listing::{
-    dest_filename, download_error_message, fill_unknown_sizes, find_file, format_listing,
-    format_status, known_size, progress_line, truncation_warning, validate_get_path,
+    dest_filename, download_error_message, file_from_path, fill_unknown_sizes, format_listing,
+    format_status, human_size, known_size, progress_line, thumb_sources, truncation_warning,
+    validate_get_path, ThumbSource,
 };
 use osmo_cli::{config, route::route_warning};
 use osmo_core::ble::{model_name, pair_and_read_wifi, PairOptions};
 use osmo_core::datalink::{has_media_records, CameraSession, SessionConfig, SessionError};
+use osmo_core::embedded_jpeg::{embedded_jpeg, image_kind, HEAD_BYTES};
 use osmo_core::http::{HttpClient, Outcome};
 use osmo_core::media::url_path;
 use osmo_core::media::CameraFile;
@@ -64,6 +66,20 @@ enum Cmd {
         /// Files per store per query, 1 to 255 (default 45). A small value exercises paging on a small card.
         #[arg(long, value_parser = clap::value_parser!(u8).range(1..))]
         page_size: Option<u8>,
+    },
+    /// Save a file's thumbnail as an image. PATH is the camera path exactly as `osmo ls` prints it.
+    Thumb {
+        path: String,
+        /// Where to write the image.
+        #[arg(short, long)]
+        out: PathBuf,
+        #[arg(long, default_value = CAMERA_IP)]
+        ip: String,
+        #[arg(long, default_value_t = 9004)]
+        port: u16,
+        /// Skip the listing and use this store (0 = SD card, 1 = internal). This opens no datalink.
+        #[arg(long)]
+        storage: Option<u8>,
     },
     /// Download one file, resuming a partial one. PATH is the camera path exactly as `osmo ls` prints it.
     Get {
@@ -196,6 +212,67 @@ fn ls_cmd(
     Ok(())
 }
 
+fn thumb_cmd(
+    path: &str,
+    out: &PathBuf,
+    ip: &str,
+    port: u16,
+    storage: Option<u8>,
+    verbose: bool,
+) -> Result<(), String> {
+    let path = validate_get_path(path)?;
+    let (file, _session) = match storage {
+        Some(s) => {
+            warn_route(ip, port);
+            (file_from_path(s, path), None)
+        }
+        None => {
+            let mut sess = open_session(ip, port, verbose)?;
+            eprintln!("Looking up {path} ...");
+            let found = sess.find_file(path).map_err(session_err)?;
+            warn_if_unconfirmed(&sess);
+            let f = found.ok_or("not found anywhere in the camera's library: check the path against `osmo ls --all`")?;
+            (f, Some(sess))
+        }
+    };
+    let http = HttpClient::new(ip);
+    let mut tried = Vec::new();
+    let mut saved = None;
+    for src in thumb_sources(&file) {
+        let (label, bytes) = match &src {
+            ThumbSource::Whole(p) => (p.clone(), http.get_bytes(p)),
+            ThumbSource::EmbeddedHead(p) => (
+                format!("{p} (embedded EXIF)"),
+                http.get_range(p, 0, HEAD_BYTES as u64 - 1)
+                    .and_then(|head| embedded_jpeg(&head)),
+            ),
+        };
+        match bytes.as_deref().and_then(image_kind) {
+            Some(kind) => {
+                saved = Some((label, kind, bytes.unwrap_or_default()));
+                break;
+            }
+            None => tried.push(label),
+        }
+    }
+    let (label, kind, bytes) = saved.ok_or_else(|| {
+        format!(
+            "no thumbnail available for {path} (tried: {})",
+            tried.join(", ")
+        )
+    })?;
+    if let Some(dir) = out.parent().filter(|d| !d.as_os_str().is_empty()) {
+        std::fs::create_dir_all(dir).map_err(|e| e.to_string())?;
+    }
+    std::fs::write(out, &bytes).map_err(|e| format!("could not write {}: {e}", out.display()))?;
+    println!(
+        "Saved {} ({}, {kind}, from {label})",
+        out.display(),
+        human_size(bytes.len() as u64)
+    );
+    Ok(())
+}
+
 fn get_cmd(
     path: &str,
     out: &PathBuf,
@@ -218,13 +295,12 @@ fn get_cmd(
         None => {
             let mut sess = open_session(ip, port, verbose)?;
             eprintln!("Looking up {path} ...");
-            let files = sess.list_newest().map_err(session_err)?;
+            let found = sess.find_file(path).map_err(session_err)?;
             warn_if_unconfirmed(&sess);
-            let f = find_file(&files, path)
-                .ok_or("not in the camera's newest listing: pass --storage N to fetch by path")?;
+            let f = found.ok_or("not found anywhere in the camera's library: check the path against `osmo ls --all`")?;
             (
                 f.storage,
-                known_size(f, || http.head(&f.url_path())),
+                known_size(&f, || http.head(&f.url_path())),
                 Some(sess),
             )
         }
@@ -323,6 +399,13 @@ fn run() -> Result<(), String> {
             storage,
             no_keepalive,
         } => get_cmd(&path, &out, &ip, port, storage, !no_keepalive, cli.verbose),
+        Cmd::Thumb {
+            path,
+            out,
+            ip,
+            port,
+            storage,
+        } => thumb_cmd(&path, &out, &ip, port, storage, cli.verbose),
         ble_cmd => {
             let rt = Arc::new(Runtime::new().map_err(|e| e.to_string())?);
             let adapter = ble_btleplug::adapter(&rt)?;
@@ -347,7 +430,9 @@ fn run() -> Result<(), String> {
                 }
                 Cmd::Pair { device } => pair_cmd(&rt, &adapter, device, false),
                 Cmd::Wifi { device } => pair_cmd(&rt, &adapter, device, true),
-                Cmd::Ls { .. } | Cmd::Get { .. } => unreachable!("handled above"),
+                Cmd::Ls { .. } | Cmd::Get { .. } | Cmd::Thumb { .. } => {
+                    unreachable!("handled above")
+                }
             }
         }
     }

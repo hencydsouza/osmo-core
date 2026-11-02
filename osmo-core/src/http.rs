@@ -101,6 +101,33 @@ impl HttpClient {
         }
     }
 
+    fn read_limited(&self, req: ureq::Request, limit: u64) -> Option<Vec<u8>> {
+        let resp = req.call().ok()?;
+        let mut out = Vec::new();
+        resp.into_reader().take(limit).read_to_end(&mut out).ok()?;
+        Some(out)
+    }
+
+    /// A small file whole (a thumbnail), at most 16 MiB; `None` on any non-2xx or error.
+    pub fn get_bytes(&self, path: &str) -> Option<Vec<u8>> {
+        let req = agent()
+            .get(&self.url(path))
+            .set("Accept", "*/*")
+            .set("Connection", "close");
+        self.read_limited(req, 16 * 1024 * 1024)
+    }
+
+    /// An inclusive byte range. Reads at most `end - start + 1` bytes even if the server ignores the range and
+    /// answers 200 with the whole file.
+    pub fn get_range(&self, path: &str, start: u64, end: u64) -> Option<Vec<u8>> {
+        let req = agent()
+            .get(&self.url(path))
+            .set("Accept", "*/*")
+            .set("Connection", "close")
+            .set("Range", &format!("bytes={start}-{end}"));
+        self.read_limited(req, end.checked_sub(start)? + 1)
+    }
+
     pub fn url(&self, path: &str) -> String {
         format!("{}{path}", self.base)
     }

@@ -62,6 +62,51 @@ pub fn format_status(s: &osmo_core::status::Status) -> String {
     parts.join("  ")
 }
 
+/// Where a thumbnail might come from, tried in order: a whole small file, or the EXIF-embedded JPEG inside the
+/// first 64 KiB of a still's original.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ThumbSource {
+    Whole(String),
+    EmbeddedHead(String),
+}
+
+/// The camera keeps a `.scr` screennail per file (videos) or a `.thm` (stills), never both; a still can also
+/// carry a JPEG in its own EXIF. Each entry is an HTTP path on the file's store.
+pub fn thumb_sources(f: &CameraFile) -> Vec<ThumbSource> {
+    let on = |path: &str| osmo_core::media::url_path(f.storage, path);
+    let mut v = vec![ThumbSource::Whole(on(&f.thumb_path))];
+    if let Some(stem) = f.thumb_path.strip_suffix(".scr") {
+        v.push(ThumbSource::Whole(on(&format!("{stem}.thm"))));
+    }
+    if !f.is_video() {
+        v.push(ThumbSource::EmbeddedHead(f.url_path()));
+    }
+    v
+}
+
+/// A file known only by its store and camera path (the `--storage` shortcut skips the listing).
+pub fn file_from_path(storage: u8, path: &str) -> CameraFile {
+    let name = path.rsplit('/').next().unwrap_or(path).to_string();
+    CameraFile {
+        ext: name
+            .rsplit_once('.')
+            .map(|(_, e)| e.to_uppercase())
+            .unwrap_or_default(),
+        name,
+        path: path.to_string(),
+        thumb_path: osmo_core::media::derive_thumb_path(path),
+        storage,
+        size_bytes: 0,
+        handle: 0,
+        group: 0,
+        seq: 0,
+        cmd_handle: 0,
+        handle_candidate: 0,
+        handle_shared: false,
+        starred: false,
+    }
+}
+
 /// When a page arrived cut short even after a retry, the listing may be missing files.
 pub fn truncation_warning(truncated: bool) -> Option<String> {
     truncated.then(|| {
@@ -301,6 +346,44 @@ mod tests {
             "{}",
             rows[1]
         );
+    }
+
+    #[test]
+    fn thumb_sources_try_scr_then_thm_then_the_embedded_jpeg_for_stills() {
+        let mut still = file("DCIM/DJI_001/DJI_X_D.JPG", 0, 10);
+        still.ext = "JPG".into();
+        still.thumb_path = "MISC/THM/DJI_001/DJI_X_D.scr".into();
+        assert_eq!(
+            thumb_sources(&still),
+            vec![
+                ThumbSource::Whole("/v2?storage=0&path=MISC/THM/DJI_001/DJI_X_D.scr".into()),
+                ThumbSource::Whole("/v2?storage=0&path=MISC/THM/DJI_001/DJI_X_D.thm".into()),
+                ThumbSource::EmbeddedHead("/v2?storage=0&path=DCIM/DJI_001/DJI_X_D.JPG".into()),
+            ]
+        );
+        let mut video = file("DCIM/DJI_001/DJI_Y_D.MP4", 1, 10);
+        video.thumb_path = "MISC/THM/DJI_001/DJI_Y_D.scr".into();
+        let sources = thumb_sources(&video);
+        assert_eq!(
+            sources.len(),
+            2,
+            "a video has no EXIF thumbnail to fall back on"
+        );
+        assert_eq!(
+            sources[1],
+            ThumbSource::Whole("/v2?storage=1&path=MISC/THM/DJI_001/DJI_Y_D.thm".into())
+        );
+    }
+
+    #[test]
+    fn file_from_path_derives_the_thumbnail_path_for_the_storage_shortcut() {
+        let f = file_from_path(1, "DCIM/DJI_001/DJI_20260903165023_0012_D.JPG");
+        assert_eq!((f.storage, f.ext.as_str()), (1, "JPG"));
+        assert_eq!(
+            f.thumb_path,
+            "MISC/THM/DJI_001/DJI_20260903165023_0012_D.scr"
+        );
+        assert_eq!(f.name, "DJI_20260903165023_0012_D.JPG");
     }
 
     #[test]

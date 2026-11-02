@@ -32,6 +32,11 @@ pub struct CameraFile {
 }
 
 impl CameraFile {
+    /// A video (as opposed to a still), by its stored upper-case extension.
+    pub fn is_video(&self) -> bool {
+        matches!(self.ext.as_str(), "MP4" | "MOV" | "OSV" | "INSV")
+    }
+
     /// A delete command can name this file safely: it has a verified handle that nobody else holds.
     pub fn deletable(&self) -> bool {
         self.handle != 0 && !self.handle_shared
@@ -43,7 +48,65 @@ impl CameraFile {
     }
 }
 
+/// The thumbnail (screennail) path the camera keeps for a media path: `DCIM/<dir>/<base>.<ext>` is
+/// `MISC/THM/<dir>/<base>.scr`.
+pub fn derive_thumb_path(path: &str) -> String {
+    let p = path.replacen("DCIM/", "MISC/THM/", 1);
+    let (dir, name) = p.rsplit_once('/').unwrap_or(("", &p));
+    let stem = name.rsplit_once('.').map_or(name, |(s, _)| s);
+    if dir.is_empty() {
+        format!("{stem}.scr")
+    } else {
+        format!("{dir}/{stem}.scr")
+    }
+}
+
 /// `/v2?storage=N&path=P`, the HTTP path of a file given only its store and camera path.
 pub fn url_path(storage: u8, path: &str) -> String {
     format!("/v2?storage={storage}&path={path}")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn file(path: &str, ext: &str) -> CameraFile {
+        CameraFile {
+            path: path.to_string(),
+            thumb_path: String::new(),
+            name: path.rsplit('/').next().unwrap().to_string(),
+            ext: ext.to_string(),
+            storage: 0,
+            size_bytes: 0,
+            handle: 0,
+            group: 0,
+            seq: 0,
+            cmd_handle: 0,
+            handle_candidate: 0,
+            handle_shared: false,
+            starred: false,
+        }
+    }
+
+    #[test]
+    fn is_video_covers_the_stored_upper_case_video_extensions() {
+        for e in ["MP4", "MOV", "OSV", "INSV"] {
+            assert!(file("DCIM/a/x", e).is_video(), "{e}");
+        }
+        for e in ["JPG", "DNG", "HEIC", ""] {
+            assert!(!file("DCIM/a/x", e).is_video(), "{e}");
+        }
+    }
+
+    #[test]
+    fn derive_thumb_path_swaps_the_dcim_root_and_the_extension() {
+        assert_eq!(
+            derive_thumb_path("DCIM/DJI_001/DJI_20260903165023_0012_D.JPG"),
+            "MISC/THM/DJI_001/DJI_20260903165023_0012_D.scr"
+        );
+        assert_eq!(
+            derive_thumb_path("DCIM/DJI_001/NOEXT"),
+            "MISC/THM/DJI_001/NOEXT.scr"
+        );
+    }
 }
