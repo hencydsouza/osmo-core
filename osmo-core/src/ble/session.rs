@@ -1,7 +1,7 @@
 //! BLE pairing and WiFi-credential retrieval, independent of any BLE stack.
 //! Sequence (Osmosis `MEDIA_PROTOCOL.md` "Waking a sleeping camera", §22-26):
 //! wake `0x00/0x2b 04 00` -> SetPairingPIN `0x07/0x45` -> keepalive `0x00/0x2b 01 01` (about 1 Hz)
-//! -> GetWifiSsid / GetWifiPassword / GetWifiMac, with a gap between `fff5` writes.
+//! -> `0x53/0x10` (wakes the camera and its WiFi AP) -> GetWifiSsid / GetWifiPassword / GetWifiMac, with a gap between `fff5` writes.
 use super::link::{BleLink, LinkError};
 use super::reassembler::Reassembler;
 use crate::duml::commands::*;
@@ -238,6 +238,10 @@ pub fn pair_and_read_wifi(
     on_step("Pairing");
     s.pair(on_step)?;
     s.keepalive()?;
+    // `0x53/0x10` (to type 0x1C, not the camera) is what actually wakes a sleeping camera and brings its
+    // WiFi AP up; the camera answers `01 00 00 00`. Fire and forget, as Osmosis does.
+    let id = s.id();
+    s.write(&session_5310(id))?;
 
     on_step("Reading WiFi credentials");
     let ssid = s
@@ -383,6 +387,7 @@ mod tests {
                 (0, 0x2b),
                 (7, 0x45),
                 (0, 0x2b),
+                (0x53, 0x10),
                 (7, 0x07),
                 (7, 0x0e),
                 (7, 0x0c)
@@ -390,6 +395,12 @@ mod tests {
         );
         assert_eq!(link.writes[0].1.payload, vec![4, 0]);
         assert_eq!(link.writes[2].1.payload, vec![1, 1]);
+        let wake = &link.writes[3].1;
+        assert_eq!(
+            (wake.target, wake.payload.clone()),
+            (0x1C02, vec![0, 0, 0, 0]),
+            "0x53/0x10 goes to type 0x1C, not the camera"
+        );
         for w in link.writes.windows(2) {
             assert!(
                 w[1].0 - w[0].0 >= Duration::from_millis(15),

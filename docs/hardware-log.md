@@ -32,3 +32,11 @@ Findings from real data (the captured fixtures never showed these):
 
 Next: `osmo ls --dump <file>` captures the raw manifest so findings 1 and 2 can be reproduced offline and
 fixed test-first.
+
+## Finding after HW-2: the camera's WiFi was missing (2026-11-03)
+
+After the first run, the camera's WiFi no longer appeared although the camera was on. The camera's AP sleeps
+when idle and is brought up by the BLE session sequence including `0x53/0x10` (to receiver type 0x1C), which
+Osmosis sends after pairing. The Rust pairing session omitted that step (the earlier success most likely
+rode on an AP that was already up). Fixed test-first: the pairing order test now expects
+wake, pair, keepalive, `0x53/0x10`, then the credential getters. Not yet re-verified live.
