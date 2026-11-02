@@ -270,7 +270,8 @@ impl<D: Datagram> CameraSession<D> {
     }
 
     /// Raw reply datagrams of the last listing. Re-decodable with `decode_manifest`, so a live capture
-    /// can be turned into a regression fixture. Contains file names and sizes, no credentials.
+    /// can be turned into a regression fixture. Holds file names and sizes plus the camera's status pushes
+    /// (device info, firmware, battery), so review it before sharing.
     pub fn last_blob(&self) -> &[u8] {
         &self.last_blob
     }
@@ -541,12 +542,19 @@ impl<D: Datagram> CameraSession<D> {
         }
     }
 
-    /// Release playback mode (the camera stays in it otherwise) and stop.
+    /// Release playback mode (the camera stays in it otherwise) and stop. Idempotent; also runs on drop, so
+    /// an early return cannot leave the camera in playback.
     pub fn close(&mut self) {
         if self.playback_held {
             self.send(0x02, 0x0C, &LEAVE_PLAYBACK, 0x01, 0);
             self.recv(Duration::from_millis(150));
             self.playback_held = false;
         }
+    }
+}
+
+impl<D: Datagram> Drop for CameraSession<D> {
+    fn drop(&mut self) {
+        self.close();
     }
 }

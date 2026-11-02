@@ -24,6 +24,8 @@ pub enum Fetch {
     RangeIgnored,
     /// A non-2xx status.
     Failed,
+    /// 416 on a resume: the file is already at least as long as the camera's, so there is nothing to fetch.
+    RangeNotSatisfiable,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -132,6 +134,9 @@ impl HttpClient {
         }
         let resp = match req.call() {
             Ok(r) => r,
+            Err(ureq::Error::Status(416, _)) if range_start > 0 => {
+                return Fetch::RangeNotSatisfiable
+            }
             Err(ureq::Error::Status(..)) => return Fetch::Failed,
             Err(_) => return Fetch::Interrupted,
         };
@@ -196,7 +201,17 @@ impl HttpClient {
                 "download: attempt {} from {offset}: {outcome:?}, file now {after} bytes",
                 attempt + 1
             ));
-            if outcome == Fetch::Done || (remote > 0 && after >= remote) {
+            if outcome == Fetch::RangeNotSatisfiable {
+                return Ok(Outcome::AlreadyComplete);
+            }
+            // With a known size only a full-length file is a saved file: a connection that closes cleanly
+            // but early is a cut, not an end. Without one, a clean close is all we have to go on.
+            let complete = if remote > 0 {
+                after >= remote
+            } else {
+                outcome == Fetch::Done
+            };
+            if complete {
                 return Ok(Outcome::Saved);
             }
             barren = if after > offset { 0 } else { barren + 1 };

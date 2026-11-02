@@ -20,14 +20,14 @@ BLE pair -> read WiFi credentials -> (user joins the camera's WiFi) -> TCP-7001 
 | Session, playback, list | UDP | `datalink::session` | `DumlSession.kt`, `CameraSession.fetchFileList` |
 | File download | HTTP `/v2` | `http` | `HttpClient.kt`, `MediaDownloader.downloadOne` |
 
-## Things that bite (all ported, all covered by tests)
+## Things that bite (ported from Osmosis; tests use fixtures and fakes, see `hardware-log.md` for what is live-verified)
 
 - **BLE:** write DUML to `fff5` (write-without-response), notify on `fff4`/`fff5`, arm pairing with `01 00` on
   `fff4`. Space writes by at least ~100 ms. The camera drops an idle link in ~6 s: send `0x00/0x2b 01 01` about once
   a second. Approval arrives as a `0x07/0x46` *request* that must be answered.
 - **Waking the AP:** the camera's WiFi AP sleeps when idle. `0x53/0x10 00 00 00 00` to receiver type 0x1C (not
-  the camera) after pairing brings it up (about 15 s). Holding it up afterwards needs traffic: a datalink
-  session, an HTTP transfer, or a ~10 s heartbeat.
+  the camera) after pairing brings it up (about 15 s, per Osmosis; this port's wake has not been re-verified live since adding the step).
+  Holding it up afterwards needs traffic: a datalink session, an HTTP transfer, or a ~10 s heartbeat.
 - **Pairing identity:** 32 chars, minted once and persisted. A new one per run re-prompts on the camera.
 - **Datalink sequencing:** every packet carries `[ack = my previous seq][my seq]` in our own sequence space, and
   the 34-byte window ack echoes the peer's own cursors. Wrong values here silently drop writes while reads keep

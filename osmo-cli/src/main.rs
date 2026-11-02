@@ -53,7 +53,8 @@ enum Cmd {
         ip: String,
         #[arg(long, default_value_t = 9004)]
         port: u16,
-        /// Also save the raw manifest bytes here (file names and sizes only), to reproduce a decode problem offline.
+        /// Also save the raw reply datagrams here, to reproduce a decode problem offline. Mostly file names and
+        /// sizes, but also the camera's status pushes (device info, firmware, battery): review before sharing.
         #[arg(long)]
         dump: Option<PathBuf>,
     },
@@ -184,6 +185,7 @@ fn get_cmd(
         }
     };
 
+    std::fs::create_dir_all(out).map_err(|e| e.to_string())?;
     let stop = Arc::new(AtomicBool::new(false));
     let mut bg = None;
     match session {
@@ -200,7 +202,6 @@ fn get_cmd(
         None => {}
     }
 
-    std::fs::create_dir_all(out).map_err(|e| e.to_string())?;
     let dest = out.join(dest_filename(path));
     let mut last = Instant::now() - Duration::from_secs(1);
     let result = http.download_resumable(&url_path(storage, path), &dest, size, &mut |n| {

@@ -516,3 +516,51 @@ fn tcp_poke_to_a_closed_port_is_not_fatal() {
         .unwrap();
     tcp_poke_to(addr, Duration::ZERO);
 }
+
+fn leave_frames(log: &Log) -> usize {
+    duml(log)
+        .iter()
+        .filter(|(a, b, p)| (*a, *b) == (0x02, 0x0C) && p.as_slice() == [1, 1, 0, 0])
+        .count()
+}
+
+#[test]
+fn dropping_a_session_releases_playback() {
+    let frames = manifest_frames(&fixture("oa4_6.bin"), 1);
+    let (cam, log) = FakeCamera::new(Box::new(move |ctr, n| {
+        if ctr == 1 && n == 0 {
+            frames.clone()
+        } else {
+            vec![]
+        }
+    }));
+    {
+        let mut s = session(cam);
+        s.list_newest().unwrap();
+        assert!(s.playback_held());
+        assert_eq!(leave_frames(&log), 0);
+    }
+    assert_eq!(
+        leave_frames(&log),
+        1,
+        "an early return must not leave the camera in playback"
+    );
+}
+
+#[test]
+fn explicit_close_then_drop_releases_playback_only_once() {
+    let frames = manifest_frames(&fixture("oa4_6.bin"), 1);
+    let (cam, log) = FakeCamera::new(Box::new(move |ctr, n| {
+        if ctr == 1 && n == 0 {
+            frames.clone()
+        } else {
+            vec![]
+        }
+    }));
+    {
+        let mut s = session(cam);
+        s.list_newest().unwrap();
+        s.close();
+    }
+    assert_eq!(leave_frames(&log), 1);
+}

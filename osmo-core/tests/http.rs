@@ -333,3 +333,47 @@ fn download_attempts_are_logged_so_a_dropped_hotspot_is_diagnosable() {
         assert!(text.contains(want), "missing {want:?} in:\n{text}");
     }
 }
+
+#[test]
+fn a_clean_but_short_body_with_a_known_size_is_resumed_not_saved() {
+    // The connection closes cleanly after 8000 of 20000 bytes (no error, honest Content-Length for what it sent).
+    let body = data(20_000);
+    let srv = serve(vec![
+        Reply::ok(&body[..8000]),
+        Reply::partial(&body[8000..], 8000, 20_000),
+    ]);
+    let dest = tempfile::tempdir().unwrap().keep().join("a.mp4");
+    let out = client(&srv)
+        .download_resumable(P, &dest, Some(20_000), &mut |_| {})
+        .unwrap();
+    assert_eq!(out, Outcome::Saved);
+    assert_eq!(
+        std::fs::read(&dest).unwrap(),
+        body,
+        "a short file must never be reported as saved"
+    );
+    assert_eq!(
+        srv.reqs.lock().unwrap()[1].range.as_deref(),
+        Some("bytes=8000-")
+    );
+}
+
+#[test]
+fn a_416_on_a_resume_means_the_file_is_already_complete() {
+    // Remote size unknown (HEAD failed), local file already whole: asking for bytes past the end gets 416.
+    let body = data(5000);
+    let dir = tempfile::tempdir().unwrap();
+    let dest = dir.path().join("a.mp4");
+    std::fs::write(&dest, &body).unwrap();
+    let srv = serve(vec![Reply::status(416)]);
+    let out = client(&srv)
+        .download_resumable(P, &dest, None, &mut |_| {})
+        .unwrap();
+    assert_eq!(out, Outcome::AlreadyComplete);
+    assert_eq!(std::fs::read(&dest).unwrap(), body, "file untouched");
+    assert_eq!(
+        srv.reqs.lock().unwrap().len(),
+        1,
+        "one request, no stall loop"
+    );
+}
