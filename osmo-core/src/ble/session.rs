@@ -96,12 +96,23 @@ impl<'a> Session<'a> {
         if self.woken && self.last_keepalive.elapsed() >= self.opts.keepalive_interval {
             self.keepalive()?;
         }
-        let Some(frag) = self.link.recv(wait.min(Duration::from_millis(50)))? else { return Ok(()) };
+        let Some(frag) = self.link.recv(wait.min(Duration::from_millis(50)))? else {
+            return Ok(());
+        };
         for f in self.reasm.feed(&frag) {
             if f.flags() == 0x40 {
                 // The camera drops the link if its own requests go unanswered.
-                let payload = if f.cmd_set() == 0x00 && f.cmd_id() == 0x81 { APP_DEVICE_INFO.to_vec() } else { f.payload.clone() };
-                let ack = Frame { target: f.target.swap_bytes(), id: f.id, ty: (f.ty & 0xFFFF00) | 0xC0, payload };
+                let payload = if f.cmd_set() == 0x00 && f.cmd_id() == 0x81 {
+                    APP_DEVICE_INFO.to_vec()
+                } else {
+                    f.payload.clone()
+                };
+                let ack = Frame {
+                    target: f.target.swap_bytes(),
+                    id: f.id,
+                    ty: (f.ty & 0xFFFF00) | 0xC0,
+                    payload,
+                };
                 self.write(&ack.encode())?;
                 if f.cmd_set() == 0x07 && f.cmd_id() == 0x46 {
                     self.approved = true;
@@ -114,11 +125,19 @@ impl<'a> Session<'a> {
     }
 
     fn take_reply(&mut self, set: u8, cmd: u8) -> Option<Frame> {
-        let p = self.pending.iter().position(|f| f.flags() & 0x80 != 0 && f.cmd_set() == set && f.cmd_id() == cmd)?;
+        let p = self
+            .pending
+            .iter()
+            .position(|f| f.flags() & 0x80 != 0 && f.cmd_set() == set && f.cmd_id() == cmd)?;
         self.pending.remove(p)
     }
 
-    fn await_reply(&mut self, set: u8, cmd: u8, timeout: Duration) -> Result<Option<Frame>, PairError> {
+    fn await_reply(
+        &mut self,
+        set: u8,
+        cmd: u8,
+        timeout: Duration,
+    ) -> Result<Option<Frame>, PairError> {
         let end = Instant::now() + timeout;
         loop {
             if let Some(f) = self.take_reply(set, cmd) {
@@ -159,7 +178,11 @@ impl<'a> Session<'a> {
                 return Ok(());
             }
             if Instant::now() >= deadline {
-                return Err(if got_reply { PairError::NotApproved } else { PairError::NoReply("SetPairingPIN") });
+                return Err(if got_reply {
+                    PairError::NotApproved
+                } else {
+                    PairError::NoReply("SetPairingPIN")
+                });
             }
         }
     }
@@ -185,7 +208,9 @@ fn parse_string(f: &Frame) -> Option<String> {
         return None;
     }
     let len = *p.get(1)? as usize;
-    String::from_utf8(p.get(2..2 + len)?.to_vec()).ok().filter(|s| !s.is_empty())
+    String::from_utf8(p.get(2..2 + len)?.to_vec())
+        .ok()
+        .filter(|s| !s.is_empty())
 }
 
 pub fn pair_and_read_wifi(
@@ -215,13 +240,23 @@ pub fn pair_and_read_wifi(
     s.keepalive()?;
 
     on_step("Reading WiFi credentials");
-    let ssid = s.query(CMD_WIFI_SSID)?.as_ref().and_then(parse_string).ok_or(PairError::NoReply("ssid"))?;
+    let ssid = s
+        .query(CMD_WIFI_SSID)?
+        .as_ref()
+        .and_then(parse_string)
+        .ok_or(PairError::NoReply("ssid"))?;
     let password = s.query(CMD_WIFI_PASSWORD)?.as_ref().and_then(parse_string);
-    let mac = s.query(CMD_WIFI_MAC)?.and_then(|f| match f.payload.as_slice() {
-        [0, m @ ..] if m.len() >= 6 => Some([m[0], m[1], m[2], m[3], m[4], m[5]]),
-        _ => None,
-    });
-    Ok(WifiCreds { ssid, password, mac })
+    let mac = s
+        .query(CMD_WIFI_MAC)?
+        .and_then(|f| match f.payload.as_slice() {
+            [0, m @ ..] if m.len() >= 6 => Some([m[0], m[1], m[2], m[3], m[4], m[5]]),
+            _ => None,
+        });
+    Ok(WifiCreds {
+        ssid,
+        password,
+        mac,
+    })
 }
 
 #[cfg(test)]
@@ -246,7 +281,11 @@ mod tests {
 
     impl FakeLink {
         fn new() -> Self {
-            FakeLink { rules: vec![], incoming: VecDeque::new(), writes: vec![] }
+            FakeLink {
+                rules: vec![],
+                incoming: VecDeque::new(),
+                writes: vec![],
+            }
         }
         fn on(mut self, set: u8, cmd: u8, replies: Vec<Vec<u8>>) -> Self {
             self.rules.push(Rule { set, cmd, replies });
@@ -257,7 +296,11 @@ mod tests {
             self
         }
         fn sent(&self, set: u8, cmd: u8) -> Vec<&Frame> {
-            self.writes.iter().map(|(_, f)| f).filter(|f| f.cmd_set() == set && f.cmd_id() == cmd).collect()
+            self.writes
+                .iter()
+                .map(|(_, f)| f)
+                .filter(|f| f.cmd_set() == set && f.cmd_id() == cmd)
+                .collect()
         }
     }
 
@@ -265,7 +308,11 @@ mod tests {
         fn write_command(&mut self, b: &[u8]) -> Result<(), LinkError> {
             let f = Frame::decode(b).expect("session wrote a malformed frame");
             if f.flags() == 0x40 {
-                if let Some(p) = self.rules.iter().position(|r| r.set == f.cmd_set() && r.cmd == f.cmd_id()) {
+                if let Some(p) = self
+                    .rules
+                    .iter()
+                    .position(|r| r.set == f.cmd_set() && r.cmd == f.cmd_id())
+                {
                     let r = self.rules.remove(p);
                     self.incoming.extend(r.replies);
                 }
@@ -283,7 +330,13 @@ mod tests {
     }
 
     fn frame(flags: u32, set: u8, cmd: u8, id: u16, payload: &[u8]) -> Vec<u8> {
-        Frame { target: 0x0207, id, ty: flags | (set as u32) << 8 | (cmd as u32) << 16, payload: payload.to_vec() }.encode()
+        Frame {
+            target: 0x0207,
+            id,
+            ty: flags | (set as u32) << 8 | (cmd as u32) << 16,
+            payload: payload.to_vec(),
+        }
+        .encode()
     }
     fn resp(set: u8, cmd: u8, payload: &[u8]) -> Vec<u8> {
         frame(0xC0, set, cmd, 0xA000, payload)
@@ -319,12 +372,29 @@ mod tests {
         assert_eq!(creds.ssid, "OsmoAction4-1234");
         assert_eq!(creds.password.as_deref(), Some("secret99"));
         assert_eq!(creds.mac, Some([1, 2, 3, 4, 5, 6]));
-        let seq: Vec<(u8, u8)> = link.writes.iter().map(|(_, f)| (f.cmd_set(), f.cmd_id())).collect();
-        assert_eq!(seq, vec![(0, 0x2b), (7, 0x45), (0, 0x2b), (7, 0x07), (7, 0x0e), (7, 0x0c)]);
+        let seq: Vec<(u8, u8)> = link
+            .writes
+            .iter()
+            .map(|(_, f)| (f.cmd_set(), f.cmd_id()))
+            .collect();
+        assert_eq!(
+            seq,
+            vec![
+                (0, 0x2b),
+                (7, 0x45),
+                (0, 0x2b),
+                (7, 0x07),
+                (7, 0x0e),
+                (7, 0x0c)
+            ]
+        );
         assert_eq!(link.writes[0].1.payload, vec![4, 0]);
         assert_eq!(link.writes[2].1.payload, vec![1, 1]);
         for w in link.writes.windows(2) {
-            assert!(w[1].0 - w[0].0 >= Duration::from_millis(15), "writes closer than the gap");
+            assert!(
+                w[1].0 - w[0].0 >= Duration::from_millis(15),
+                "writes closer than the gap"
+            );
         }
     }
 
@@ -336,32 +406,54 @@ mod tests {
         pair_and_read_wifi(&mut link, &fast(), &mut |s| steps.push(s.to_string())).unwrap();
         let ack = link.sent(7, 0x46);
         assert_eq!(ack.len(), 1);
-        assert_eq!((ack[0].flags(), ack[0].id, ack[0].target), (0xC0, 0x1234, 0x0702));
+        assert_eq!(
+            (ack[0].flags(), ack[0].id, ack[0].target),
+            (0xC0, 0x1234, 0x0702)
+        );
         assert!(steps.iter().any(|s| s.contains("Approve")));
     }
 
     #[test]
     fn inbound_00_81_gets_app_device_info_reply() {
-        let mut link = creds_rules(FakeLink::new().on(7, 0x45, vec![resp(7, 0x45, &[0, 1])]).inject(req(0, 0x81, &[9, 9])));
+        let mut link = creds_rules(
+            FakeLink::new()
+                .on(7, 0x45, vec![resp(7, 0x45, &[0, 1])])
+                .inject(req(0, 0x81, &[9, 9])),
+        );
         pair_and_read_wifi(&mut link, &fast(), &mut |_| {}).unwrap();
         let r = link.sent(0, 0x81);
         assert_eq!(r.len(), 1);
-        assert_eq!((r[0].flags(), r[0].payload.as_slice()), (0xC0, &APP_DEVICE_INFO[..]));
+        assert_eq!(
+            (r[0].flags(), r[0].payload.as_slice()),
+            (0xC0, &APP_DEVICE_INFO[..])
+        );
     }
 
     #[test]
     fn keepalive_sent_repeatedly_while_waiting() {
         let mut link = FakeLink::new().on(7, 0x45, vec![resp(7, 0x45, &[0, 2])]);
-        let o = PairOptions { approve_timeout: Duration::from_millis(250), keepalive_interval: Duration::from_millis(30), ..fast() };
+        let o = PairOptions {
+            approve_timeout: Duration::from_millis(250),
+            keepalive_interval: Duration::from_millis(30),
+            ..fast()
+        };
         let _ = pair_and_read_wifi(&mut link, &o, &mut |_| {});
-        let pings = link.sent(0, 0x2b).into_iter().filter(|f| f.payload == vec![1, 1]).count();
+        let pings = link
+            .sent(0, 0x2b)
+            .into_iter()
+            .filter(|f| f.payload == vec![1, 1])
+            .count();
         assert!(pings >= 3, "only {pings} keepalives");
     }
 
     #[test]
     fn never_approved_times_out() {
         let mut link = FakeLink::new().on(7, 0x45, vec![resp(7, 0x45, &[0, 2])]);
-        let o = PairOptions { approve_timeout: Duration::from_millis(150), step_timeout: Duration::from_millis(40), ..fast() };
+        let o = PairOptions {
+            approve_timeout: Duration::from_millis(150),
+            step_timeout: Duration::from_millis(40),
+            ..fast()
+        };
         let t = Instant::now();
         let r = pair_and_read_wifi(&mut link, &o, &mut |_| {});
         assert!(matches!(r, Err(PairError::NotApproved)), "{r:?}");
@@ -371,8 +463,15 @@ mod tests {
     #[test]
     fn silent_camera_reports_no_reply_not_approval() {
         let mut link = FakeLink::new();
-        let o = PairOptions { approve_timeout: Duration::from_millis(100), step_timeout: Duration::from_millis(30), ..fast() };
-        assert!(matches!(pair_and_read_wifi(&mut link, &o, &mut |_| {}), Err(PairError::NoReply(_))));
+        let o = PairOptions {
+            approve_timeout: Duration::from_millis(100),
+            step_timeout: Duration::from_millis(30),
+            ..fast()
+        };
+        assert!(matches!(
+            pair_and_read_wifi(&mut link, &o, &mut |_| {}),
+            Err(PairError::NoReply(_))
+        ));
     }
 
     #[test]
@@ -387,6 +486,9 @@ mod tests {
     #[test]
     fn missing_ssid_is_an_error() {
         let mut link = FakeLink::new().on(7, 0x45, vec![resp(7, 0x45, &[0, 1])]);
-        assert!(matches!(pair_and_read_wifi(&mut link, &fast(), &mut |_| {}), Err(PairError::NoReply("ssid"))));
+        assert!(matches!(
+            pair_and_read_wifi(&mut link, &fast(), &mut |_| {}),
+            Err(PairError::NoReply("ssid"))
+        ));
     }
 }

@@ -72,12 +72,23 @@ fn legacy_model_id(p: &[u8]) -> Option<u16> {
 /// Decode a DJI manufacturer payload (company id already stripped).
 pub fn decode_advert(payload: &[u8]) -> Advert {
     if let Some(pt) = product_type(payload) {
-        let mapped = PRODUCT_TYPE_TO_MODEL_ID.iter().find(|(t, _)| *t == pt).map(|(_, m)| *m);
+        let mapped = PRODUCT_TYPE_TO_MODEL_ID
+            .iter()
+            .find(|(t, _)| *t == pt)
+            .map(|(_, m)| *m);
         if mapped.is_some() || legacy_model_id(payload).is_none() {
-            return Advert { model_id: mapped, new_format: true, raw_product_type: Some(pt) };
+            return Advert {
+                model_id: mapped,
+                new_format: true,
+                raw_product_type: Some(pt),
+            };
         }
     }
-    Advert { model_id: legacy_model_id(payload), new_format: false, raw_product_type: product_type(payload) }
+    Advert {
+        model_id: legacy_model_id(payload),
+        new_format: false,
+        raw_product_type: product_type(payload),
+    }
 }
 
 #[cfg(test)]
@@ -87,14 +98,30 @@ mod tests {
     #[test]
     fn classic_payload_decodes_action4() {
         let a = decode_advert(&[0x14, 0x00, 0x00, 0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x03]);
-        assert_eq!(a, Advert { model_id: Some(0x0014), new_format: false, raw_product_type: None });
+        assert_eq!(
+            a,
+            Advert {
+                model_id: Some(0x0014),
+                new_format: false,
+                raw_product_type: None
+            }
+        );
     }
 
     #[test]
     fn pocket4_pro_new_format_decodes() {
-        let p = [0x00, 0x00, 0x00, 0xee, 0x00, 0x04, 0xbd, 0x6e, 0x56, 0x20, 0xda, 0x00, 0x00, 0x10];
+        let p = [
+            0x00, 0x00, 0x00, 0xee, 0x00, 0x04, 0xbd, 0x6e, 0x56, 0x20, 0xda, 0x00, 0x00, 0x10,
+        ];
         let a = decode_advert(&p);
-        assert_eq!(a, Advert { model_id: Some(0x0022), new_format: true, raw_product_type: Some(218) });
+        assert_eq!(
+            a,
+            Advert {
+                model_id: Some(0x0022),
+                new_format: true,
+                raw_product_type: Some(218)
+            }
+        );
     }
 
     #[test]
@@ -111,7 +138,10 @@ mod tests {
         p[5] = 0x04;
         p[10] = 0x99;
         let a = decode_advert(&p);
-        assert_eq!((a.model_id, a.new_format, a.raw_product_type), (None, true, Some(0x99)));
+        assert_eq!(
+            (a.model_id, a.new_format, a.raw_product_type),
+            (None, true, Some(0x99))
+        );
     }
 
     #[test]
@@ -123,7 +153,9 @@ mod tests {
 
     #[test]
     fn company_ids_and_names() {
-        assert!(is_dji_company_id(0x08AA) && is_dji_company_id(0xF7AA) && is_dji_company_id(0xE5C0));
+        assert!(
+            is_dji_company_id(0x08AA) && is_dji_company_id(0xF7AA) && is_dji_company_id(0xE5C0)
+        );
         assert!(!is_dji_company_id(0x004C));
         assert_eq!(model_name(0x0014), Some("OsmoAction4"));
         assert_eq!(model_name(0x7777), None);

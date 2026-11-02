@@ -5,7 +5,11 @@ pub fn crc8(data: &[u8]) -> u8 {
     for &b in data {
         crc ^= b;
         for _ in 0..8 {
-            crc = if crc & 1 != 0 { (crc >> 1) ^ 0x8C } else { crc >> 1 };
+            crc = if crc & 1 != 0 {
+                (crc >> 1) ^ 0x8C
+            } else {
+                crc >> 1
+            };
         }
     }
     crc
@@ -16,7 +20,11 @@ pub fn crc16(data: &[u8]) -> u16 {
     for &b in data {
         crc ^= b as u16;
         for _ in 0..8 {
-            crc = if crc & 1 != 0 { (crc >> 1) ^ 0x8408 } else { crc >> 1 };
+            crc = if crc & 1 != 0 {
+                (crc >> 1) ^ 0x8408
+            } else {
+                crc >> 1
+            };
         }
     }
     crc
@@ -36,7 +44,9 @@ mod tests {
     #[test]
     fn crc16_known_value() {
         // trailer of the documented SSID query frame 550d0433020700a04007077472
-        let body = [0x55, 0x0D, 0x04, 0x33, 0x02, 0x07, 0x00, 0xA0, 0x40, 0x07, 0x07];
+        let body = [
+            0x55, 0x0D, 0x04, 0x33, 0x02, 0x07, 0x00, 0xA0, 0x40, 0x07, 0x07,
+        ];
         assert_eq!(crc16(&body), 0x7274);
     }
 }

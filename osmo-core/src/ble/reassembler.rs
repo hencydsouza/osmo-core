@@ -50,7 +50,13 @@ mod tests {
     use crate::duml::Frame;
 
     fn frame(id: u16, payload: Vec<u8>) -> Vec<u8> {
-        Frame { target: 0x0207, id, ty: 0xC0, payload }.encode()
+        Frame {
+            target: 0x0207,
+            id,
+            ty: 0xC0,
+            payload,
+        }
+        .encode()
     }
 
     #[test]
