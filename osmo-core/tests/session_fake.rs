@@ -593,3 +593,112 @@ fn status_pushes_during_a_listing_are_decoded() {
     assert_eq!(s.status().battery_percent, Some(87));
     assert_eq!(s.status().battery_millivolts, Some(4000));
 }
+
+fn live_manifest() -> Vec<u8> {
+    fixture("oa4_live_14.bin")
+}
+
+fn sd_handles(files: &[osmo_core::media::CameraFile]) -> Vec<u32> {
+    files
+        .iter()
+        .filter(|f| f.storage == 0 && f.handle != 0)
+        .map(|f| f.handle)
+        .collect()
+}
+
+fn sd_page_queries(log: &Log) -> Vec<Vec<u8>> {
+    duml(log)
+        .into_iter()
+        .filter(|(a, b, p)| (*a, *b) == (0, 0x26) && p.len() > 20 && p[4] == 1)
+        .map(|(_, _, p)| p)
+        .collect()
+}
+
+#[test]
+fn page_size_reaches_byte_14_of_the_query() {
+    let frames = manifest_frames(&live_manifest(), 1);
+    let (cam, log) = FakeCamera::new(Box::new(move |ctr, n| {
+        if ctr == 1 && n == 0 {
+            frames.clone()
+        } else {
+            vec![]
+        }
+    }));
+    let mut s = session(cam);
+    s.set_page_size(5);
+    s.list_newest().unwrap();
+    assert_eq!(sd_page_queries(&log)[0][14], 5);
+}
+
+#[test]
+fn second_page_query_carries_the_oldest_sd_handle_as_cursor_and_returns_only_new_files() {
+    let page1 = manifest_frames(&fixture("oa4_45.bin"), 1);
+    let page2 = manifest_frames(&fixture("oa4_6.bin"), 1);
+    let (cam, log) = FakeCamera::new(Box::new(move |ctr, n| match (ctr, n) {
+        (1, 0) => page1.clone(),
+        (1, 1) => page2.clone(),
+        _ => vec![],
+    }));
+    let mut s = session(cam);
+    let first = s.list_newest().unwrap();
+    assert_eq!(first.len(), 45);
+    assert!(
+        s.more_available(),
+        "a full page of 45 with no end marker means there may be more"
+    );
+    let oldest = *sd_handles(&first).iter().min().unwrap();
+
+    let second = s.list_next_page().unwrap();
+    let want_new: Vec<String> = decode_manifest(&fixture("oa4_6.bin"))
+        .into_iter()
+        .map(|f| f.path)
+        .filter(|p| !first.iter().any(|f| &f.path == p))
+        .collect();
+    assert!(
+        !want_new.is_empty(),
+        "fixture choice must give the page at least one new file"
+    );
+    assert_eq!(
+        second.iter().map(|f| f.path.clone()).collect::<Vec<_>>(),
+        want_new,
+        "only unseen files are returned"
+    );
+
+    let q = sd_page_queries(&log);
+    assert_eq!(q.len(), 2);
+    assert_eq!(
+        &q[1][10..14],
+        &oldest.to_le_bytes(),
+        "page 2 asks for files older than page 1's oldest SD handle"
+    );
+    assert!(
+        !s.more_available(),
+        "oa4_6 is a short page with the end marker: the library is finished"
+    );
+    assert!(
+        s.list_next_page().unwrap().is_empty(),
+        "exhausted: no further query"
+    );
+    assert_eq!(sd_page_queries(&log).len(), 2);
+}
+
+#[test]
+fn a_truncated_page_keeps_more_available_and_sets_the_flag() {
+    let cut = live_manifest()[..3000].to_vec();
+    let frames = manifest_frames(&cut, 1);
+    let (cam, _log) = FakeCamera::new(Box::new(move |ctr, n| {
+        if ctr == 1 && n <= 1 {
+            frames.clone()
+        } else {
+            vec![]
+        }
+    }));
+    let mut s = session(cam);
+    let files = s.list_newest().unwrap();
+    assert!(files.len() < 14, "the page really was cut short");
+    assert!(s.diagnostics().truncated, "the caller is told");
+    assert!(
+        s.more_available(),
+        "a truncated page is not the end of the library"
+    );
+}

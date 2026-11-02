@@ -2,12 +2,16 @@
 //! newest-page file list. Ported from Osmosis `DumlSession.kt` / `CameraSession.kt` for the Action 4
 //! path (single page, no delete/favourite/burst, no time sync, no `0x01/0x01` playback route).
 use super::manifest::collect_stores;
+use super::paging::{
+    seed_cursors, slice_info, step_pagination, SliceInfo, NEWEST_INTERNAL, NEWEST_SD,
+};
 use super::stream::{chunk_tally, count_media_paths, manifest_bytes, streams_ended};
 use super::transport::{Datagram, Transport, UdpPeer};
 use crate::duml::commands::{set_pairing_pin, APP_DEVICE_INFO, DEFAULT_IDENTIFIER};
 use crate::duml::{find_reply, scan_frames};
 use crate::media::CameraFile;
 use crate::status::Status;
+use std::collections::{HashMap, HashSet};
 use std::io;
 use std::net::{SocketAddr, TcpStream};
 use std::time::{Duration, Instant};
@@ -37,9 +41,8 @@ const CONTROL_ENTER: [u8; 11] = [0x00, 0, 0, 0, 0, 0x04, 0, 0, 0, 0x04, 0x01];
 const CONTROL_PRELUDE_FRAMES: u32 = 6;
 const CONTROL_SILENT_LIMIT: u32 = 8;
 const LIST_TRIGGER: [u8; 14] = [0x4a, 0x04, 0x0e, 0x10, 0x01, 0, 0, 0, 0, 0, 0x01, 0, 0, 0];
-const NEWEST_SD: u32 = 0x0000_0001;
-const NEWEST_INTERNAL: u32 = 0x4000_0001;
-const PAGE_SIZE: u8 = 45;
+/// Records asked for per store per query (byte 14 of the `0x00/0x26` payload); Mimo's own page size.
+const DEFAULT_PAGE_SIZE: u8 = 45;
 const SD_CTR: u8 = 1;
 const INTERNAL_CTR: u8 = 2;
 
@@ -70,12 +73,12 @@ fn subscription(name: &str, id: u32) -> Vec<u8> {
 }
 
 /// `0x00/0x26` media-list query: counter at byte 4, cursor at 10..14 (top bit selects the store), page size at 14.
-fn list_cmd(ctr: u8, cursor: u32) -> Vec<u8> {
+fn list_cmd(ctr: u8, cursor: u32, page_size: u8) -> Vec<u8> {
     let mut c =
         hex("4a002a10010000000000010000002d000d0100ffffffffffffffff000100000000000000000000000000");
     c[4] = ctr;
     c[10..14].copy_from_slice(&cursor.to_le_bytes());
-    c[14] = PAGE_SIZE;
+    c[14] = page_size;
     c
 }
 
@@ -199,6 +202,9 @@ pub struct Diagnostics {
     /// The camera itself reported playback mode (bit 30 of `0x02/0x80`). Without it a camera still in
     /// capture answers the list with nothing or a partial page.
     pub playback_confirmed: bool,
+    /// A page arrived with fewer records than its header promised, even after one retry: the listing may be
+    /// missing files, and the library must not be treated as finished.
+    pub truncated: bool,
 }
 
 pub struct CameraSession<D: Datagram> {
@@ -211,6 +217,13 @@ pub struct CameraSession<D: Datagram> {
     last_blob: Vec<u8>,
     logger: Option<Logger>,
     status: Status,
+    page_size: u8,
+    sd_cursor: u32,
+    internal_cursor: u32,
+    seen: HashSet<(u8, String)>,
+    more_available: bool,
+    last_slices: HashMap<u8, SliceInfo>,
+    truncated: bool,
 }
 
 impl CameraSession<UdpPeer> {
@@ -244,6 +257,13 @@ impl<D: Datagram> CameraSession<D> {
             last_blob: Vec::new(),
             logger: None,
             status: Status::default(),
+            page_size: DEFAULT_PAGE_SIZE,
+            sd_cursor: NEWEST_SD,
+            internal_cursor: NEWEST_INTERNAL,
+            seen: HashSet::new(),
+            more_available: false,
+            last_slices: HashMap::new(),
+            truncated: false,
         }
     }
 
@@ -258,6 +278,17 @@ impl<D: Datagram> CameraSession<D> {
         }
     }
 
+    /// Records asked for per store per query, 1 to 255 (default 45). A small value lets paging be exercised on a
+    /// small card.
+    pub fn set_page_size(&mut self, n: u8) {
+        self.page_size = n.max(1);
+    }
+
+    /// Is there probably an older page? Meaningful after `list_newest`.
+    pub fn more_available(&self) -> bool {
+        self.more_available
+    }
+
     /// Battery and storage as last pushed by the camera.
     pub fn status(&self) -> &Status {
         &self.status
@@ -270,6 +301,7 @@ impl<D: Datagram> CameraSession<D> {
     pub fn diagnostics(&self) -> Diagnostics {
         Diagnostics {
             playback_confirmed: self.playback_held,
+            truncated: self.truncated,
         }
     }
 
@@ -467,12 +499,21 @@ impl<D: Datagram> CameraSession<D> {
         self.beat();
     }
 
-    fn query_newest(&mut self) -> Vec<CameraFile> {
+    /// One page query pair at the given cursors (SD under counter 1, the trigger frame, internal under counter 2),
+    /// collected until the camera has closed its answers or the path count stops growing.
+    fn query_page(
+        &mut self,
+        sd_cursor: u32,
+        internal_cursor: u32,
+        wait: Duration,
+        retry_empty_sd: bool,
+    ) -> Vec<CameraFile> {
         let mut blob = Vec::new();
-        self.send(0x00, 0x26, &list_cmd(SD_CTR, NEWEST_SD), 0x01, 0);
+        let ps = self.page_size;
+        self.send(0x00, 0x26, &list_cmd(SD_CTR, sd_cursor, ps), 0x01, 0);
         let (mut last, mut stable) = (None::<usize>, 0);
         for batch in 0..self.timing.max_batches {
-            self.collect(&mut blob, self.timing.batch);
+            self.collect(&mut blob, wait);
             if batch == 1 {
                 self.send(0x00, 0x26, &LIST_TRIGGER, 0x01, 0);
             }
@@ -480,7 +521,7 @@ impl<D: Datagram> CameraSession<D> {
                 self.send(
                     0x00,
                     0x26,
-                    &list_cmd(INTERNAL_CTR, NEWEST_INTERNAL),
+                    &list_cmd(INTERNAL_CTR, internal_cursor, ps),
                     0x01,
                     0,
                 );
@@ -506,8 +547,14 @@ impl<D: Datagram> CameraSession<D> {
             }
             last = Some(count);
         }
-        self.retry_sd_if_empty(&mut blob);
+        if retry_empty_sd {
+            self.retry_sd_if_empty(&mut blob, sd_cursor);
+        }
         let files = collect_stores(&blob, SD_CTR, INTERNAL_CTR);
+        self.last_slices = HashMap::from([
+            (0, slice_info(&blob, SD_CTR)),
+            (1, slice_info(&blob, INTERNAL_CTR)),
+        ]);
         let sd = files.iter().filter(|f| f.storage == 0).count();
         self.log(format!(
             "list: {} files (sd {sd}, internal {})",
@@ -518,13 +565,35 @@ impl<D: Datagram> CameraSession<D> {
         files
     }
 
+    /// `query_page`, asked once more with doubled waits if a store's answer arrived cut short (fewer records
+    /// than its header promised). Whether it still is cut is left in `truncated`.
+    fn query_page_checked(
+        &mut self,
+        sd_cursor: u32,
+        internal_cursor: u32,
+        retry_empty_sd: bool,
+    ) -> Vec<CameraFile> {
+        let wait = self.timing.batch;
+        let mut files = self.query_page(sd_cursor, internal_cursor, wait, retry_empty_sd);
+        if self.last_slices.values().any(SliceInfo::incomplete) {
+            self.log("list: a store's answer was cut short, asking again with longer waits");
+            files = self.query_page(sd_cursor, internal_cursor, wait * 2, false);
+        }
+        self.truncated = self.last_slices.values().any(SliceInfo::incomplete);
+        if self.truncated {
+            self.log("list: STILL cut short; the listing may be missing files");
+        }
+        files
+    }
+
     /// A store can answer empty because it was not mounted yet; ask the SD once more after a delay.
-    fn retry_sd_if_empty(&mut self, blob: &mut Vec<u8>) {
+    fn retry_sd_if_empty(&mut self, blob: &mut Vec<u8>, sd_cursor: u32) {
         if !manifest_bytes(blob, Some(SD_CTR)).is_empty() {
             return;
         }
         self.log("list: SD answered empty, asking once more (it may not have been mounted yet)");
-        self.send(0x00, 0x26, &list_cmd(SD_CTR, NEWEST_SD), 0x01, 0);
+        let ps = self.page_size;
+        self.send(0x00, 0x26, &list_cmd(SD_CTR, sd_cursor, ps), 0x01, 0);
         for batch in 0..6 {
             self.collect(blob, self.timing.retry_batch);
             if batch == 1 {
@@ -533,13 +602,45 @@ impl<D: Datagram> CameraSession<D> {
         }
     }
 
-    /// Handshake, register, enter playback and return the newest page (45 records per store).
-    /// An empty card yields `Ok(vec![])`.
+    /// Handshake, register, enter playback and return the newest page (`set_page_size`, default 45, records per
+    /// store). An empty card yields `Ok(vec![])`.
     pub fn list_newest(&mut self) -> Result<Vec<CameraFile>, SessionError> {
         self.open_and_register()?;
         self.enter_playback();
         self.settle_after_playback();
-        Ok(self.query_newest())
+        let files = self.query_page_checked(NEWEST_SD, NEWEST_INTERNAL, true);
+        self.seen = files.iter().map(|f| (f.storage, f.path.clone())).collect();
+        (self.sd_cursor, self.internal_cursor, self.more_available) =
+            seed_cursors(&files, &self.last_slices, self.page_size as usize);
+        Ok(files)
+    }
+
+    /// The next older page on the same session, returning only files not seen before; empty once the library is
+    /// exhausted. A page that stays cut short is still returned (and flagged in `diagnostics().truncated`), and
+    /// does not end the walk.
+    pub fn list_next_page(&mut self) -> Result<Vec<CameraFile>, SessionError> {
+        if !self.more_available {
+            return Ok(Vec::new());
+        }
+        let page = self.query_page_checked(self.sd_cursor, self.internal_cursor, false);
+        let step = step_pagination(
+            self.sd_cursor,
+            self.internal_cursor,
+            &page,
+            &mut self.seen,
+            &self.last_slices,
+            self.page_size as usize,
+        );
+        (self.sd_cursor, self.internal_cursor, self.more_available) =
+            (step.sd_cursor, step.internal_cursor, step.more_available);
+        self.log(format!(
+            "list: next page: {} new, cursors sd=0x{:08x} internal=0x{:08x}, more={}",
+            step.fresh.len(),
+            step.sd_cursor,
+            step.internal_cursor,
+            step.more_available
+        ));
+        Ok(step.fresh)
     }
 
     /// Call every few hundred ms to keep the link (and the camera's WiFi AP) up while idle.

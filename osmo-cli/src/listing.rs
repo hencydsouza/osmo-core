@@ -62,6 +62,13 @@ pub fn format_status(s: &osmo_core::status::Status) -> String {
     parts.join("  ")
 }
 
+/// When a page arrived cut short even after a retry, the listing may be missing files.
+pub fn truncation_warning(truncated: bool) -> Option<String> {
+    truncated.then(|| {
+        "the camera cut a page short, so this listing may be incomplete; run it again (add -v to see which store)".to_string()
+    })
+}
+
 /// What to tell the user when a download gave up. A stall is nearly always the camera's WiFi going to sleep.
 pub fn download_error_message(e: &osmo_core::http::DownloadError) -> String {
     match e {
@@ -104,7 +111,12 @@ pub fn format_listing(files: &[CameraFile]) -> String {
     let mut lines = vec![row("STORE", "SIZE", "PATH")];
     for f in files {
         let store = if f.storage == 1 { "internal" } else { "sd" };
-        lines.push(row(store, &human_size(f.size_bytes), &f.path));
+        let star = if f.starred { " \u{2605}" } else { "" };
+        lines.push(row(
+            store,
+            &human_size(f.size_bytes),
+            &format!("{}{star}", f.path),
+        ));
     }
     lines.join("\n")
 }
@@ -264,6 +276,31 @@ mod tests {
             ..Default::default()
         };
         assert_eq!(format_status(&both), "internal 10.0 GiB free of 47.8 GiB");
+    }
+
+    #[test]
+    fn truncation_warning_names_the_risk() {
+        let w = truncation_warning(true).unwrap();
+        assert!(
+            w.contains("incomplete") && w.contains("run it again"),
+            "{w}"
+        );
+        assert_eq!(truncation_warning(false), None);
+    }
+
+    #[test]
+    fn star_marker_appears_only_on_starred_rows() {
+        let mut starred = file("DCIM/DJI_001/A.JPG", 0, 10);
+        starred.starred = true;
+        let plain = file("DCIM/DJI_001/B.JPG", 0, 10);
+        let out = format_listing(&[starred, plain]);
+        let rows: Vec<&str> = out.lines().skip(1).collect();
+        assert!(rows[0].ends_with("A.JPG \u{2605}"), "{}", rows[0]);
+        assert!(
+            rows[1].ends_with("B.JPG") && !rows[1].contains('\u{2605}'),
+            "{}",
+            rows[1]
+        );
     }
 
     #[test]

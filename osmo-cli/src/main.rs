@@ -3,13 +3,14 @@ mod ble_btleplug;
 use clap::{Parser, Subcommand};
 use osmo_cli::listing::{
     dest_filename, download_error_message, fill_unknown_sizes, find_file, format_listing,
-    format_status, known_size, progress_line, validate_get_path,
+    format_status, known_size, progress_line, truncation_warning, validate_get_path,
 };
 use osmo_cli::{config, route::route_warning};
 use osmo_core::ble::{model_name, pair_and_read_wifi, PairOptions};
 use osmo_core::datalink::{has_media_records, CameraSession, SessionConfig, SessionError};
 use osmo_core::http::{HttpClient, Outcome};
 use osmo_core::media::url_path;
+use osmo_core::media::CameraFile;
 use std::net::{IpAddr, UdpSocket};
 use std::path::PathBuf;
 use std::process::ExitCode;
@@ -57,6 +58,12 @@ enum Cmd {
         /// sizes, but also the camera's status pushes (device info, firmware, battery): review before sharing.
         #[arg(long)]
         dump: Option<PathBuf>,
+        /// Walk every page instead of only the newest 45 files per store.
+        #[arg(long)]
+        all: bool,
+        /// Files per store per query, 1 to 255 (default 45). A small value exercises paging on a small card.
+        #[arg(long, value_parser = clap::value_parser!(u8).range(1..))]
+        page_size: Option<u8>,
     },
     /// Download one file, resuming a partial one. PATH is the camera path exactly as `osmo ls` prints it.
     Get {
@@ -124,11 +131,45 @@ fn warn_if_unconfirmed(s: &CameraSession<osmo_core::datalink::UdpPeer>) {
     }
 }
 
-fn ls_cmd(ip: &str, port: u16, dump: Option<&PathBuf>, verbose: bool) -> Result<(), String> {
+fn list_pages(
+    s: &mut CameraSession<osmo_core::datalink::UdpPeer>,
+    all: bool,
+) -> Result<Vec<CameraFile>, SessionError> {
+    let mut files = s.list_newest()?;
+    if all {
+        // A page cap guards against a camera that keeps answering with files we have not seen.
+        for _ in 0..500 {
+            if !s.more_available() {
+                break;
+            }
+            let next = s.list_next_page()?;
+            if next.is_empty() {
+                break;
+            }
+            files.extend(next);
+        }
+    }
+    Ok(files)
+}
+
+fn ls_cmd(
+    ip: &str,
+    port: u16,
+    dump: Option<&PathBuf>,
+    all: bool,
+    page_size: Option<u8>,
+    verbose: bool,
+) -> Result<(), String> {
     let mut s = open_session(ip, port, verbose)?;
+    if let Some(n) = page_size {
+        s.set_page_size(n);
+    }
     eprintln!("Listing {ip}:{port} ...");
-    let files = s.list_newest().map_err(session_err);
+    let files = list_pages(&mut s, all).map_err(session_err);
     warn_if_unconfirmed(&s);
+    if let Some(w) = truncation_warning(s.diagnostics().truncated) {
+        eprintln!("warning: {w}");
+    }
     let status_line = format_status(s.status());
     if !status_line.is_empty() {
         eprintln!("{status_line}");
@@ -267,7 +308,13 @@ fn pair_cmd(
 fn run() -> Result<(), String> {
     let cli = Cli::parse();
     match cli.cmd {
-        Cmd::Ls { ip, port, dump } => ls_cmd(&ip, port, dump.as_ref(), cli.verbose),
+        Cmd::Ls {
+            ip,
+            port,
+            dump,
+            all,
+            page_size,
+        } => ls_cmd(&ip, port, dump.as_ref(), all, page_size, cli.verbose),
         Cmd::Get {
             path,
             out,
