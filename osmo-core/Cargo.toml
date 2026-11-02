@@ -1,0 +1,13 @@
+[package]
+name = "osmo-core"
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+
+[dependencies]
+thiserror = "1"
+rand = "0.8"
+ureq = "2"
+
+[dev-dependencies]
+tiny_http = "0.12"
