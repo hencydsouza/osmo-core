@@ -1,7 +1,9 @@
 mod ble_btleplug;
 
 use clap::{Parser, Subcommand};
-use osmo_cli::listing::{dest_filename, find_file, format_listing, human_size, validate_get_path};
+use osmo_cli::listing::{
+    dest_filename, find_file, format_listing, progress_line, validate_get_path,
+};
 use osmo_cli::{config, route::route_warning};
 use osmo_core::ble::{model_name, pair_and_read_wifi, PairOptions};
 use osmo_core::datalink::{CameraSession, SessionConfig, SessionError};
@@ -47,6 +49,9 @@ enum Cmd {
         ip: String,
         #[arg(long, default_value_t = 9004)]
         port: u16,
+        /// Also save the raw manifest bytes here (file names and sizes only), to reproduce a decode problem offline.
+        #[arg(long)]
+        dump: Option<PathBuf>,
     },
     /// Download one file, resuming a partial one. PATH is the camera path exactly as `osmo ls` prints it.
     Get {
@@ -101,10 +106,15 @@ fn open_session(
     CameraSession::open(&cfg).map_err(session_err)
 }
 
-fn ls_cmd(ip: &str, port: u16) -> Result<(), String> {
+fn ls_cmd(ip: &str, port: u16, dump: Option<&PathBuf>) -> Result<(), String> {
     let mut s = open_session(ip, port)?;
     eprintln!("Listing {ip}:{port} ...");
     let files = s.list_newest().map_err(session_err);
+    if let Some(path) = dump {
+        std::fs::write(path, s.last_blob())
+            .map_err(|e| format!("could not write {}: {e}", path.display()))?;
+        eprintln!("Raw manifest saved to {}", path.display());
+    }
     s.close();
     println!("{}", format_listing(&files?));
     Ok(())
@@ -153,15 +163,15 @@ fn get_cmd(
 
     std::fs::create_dir_all(out).map_err(|e| e.to_string())?;
     let dest = out.join(dest_filename(path));
-    let total = size.map_or("?".to_string(), human_size);
     let mut last = Instant::now() - Duration::from_secs(1);
     let result = http.download_resumable(&url_path(storage, path), &dest, size, &mut |n| {
         if last.elapsed() >= Duration::from_millis(250) {
-            eprint!("\r{} / {}      ", human_size(n), total);
+            eprint!("\r{}      ", progress_line(n, size));
             last = Instant::now();
         }
     });
-    eprintln!();
+    let final_len = std::fs::metadata(&dest).map(|m| m.len()).unwrap_or(0);
+    eprintln!("\r{}      ", progress_line(final_len, size));
 
     if let Some(h) = bg {
         stop.store(true, Ordering::Relaxed);
@@ -213,7 +223,7 @@ fn pair_cmd(
 fn run() -> Result<(), String> {
     let cli = Cli::parse();
     match cli.cmd {
-        Cmd::Ls { ip, port } => ls_cmd(&ip, port),
+        Cmd::Ls { ip, port, dump } => ls_cmd(&ip, port, dump.as_ref()),
         Cmd::Get {
             path,
             out,

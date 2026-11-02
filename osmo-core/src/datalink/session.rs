@@ -184,6 +184,7 @@ pub struct CameraSession<D: Datagram> {
     playback_reported: Option<bool>,
     playback_held: bool,
     last_presence: Instant,
+    last_blob: Vec<u8>,
 }
 
 impl CameraSession<UdpPeer> {
@@ -214,6 +215,7 @@ impl<D: Datagram> CameraSession<D> {
             playback_reported: None,
             playback_held: false,
             last_presence: Instant::now(),
+            last_blob: Vec::new(),
         }
     }
 
@@ -223,6 +225,12 @@ impl<D: Datagram> CameraSession<D> {
 
     pub fn playback_held(&self) -> bool {
         self.playback_held
+    }
+
+    /// Raw reply datagrams of the last listing. Re-decodable with `decode_manifest`, so a live capture
+    /// can be turned into a regression fixture. Contains file names and sizes, no credentials.
+    pub fn last_blob(&self) -> &[u8] {
+        &self.last_blob
     }
 
     fn recv(&mut self, dur: Duration) -> Vec<Vec<u8>> {
@@ -376,7 +384,9 @@ impl<D: Datagram> CameraSession<D> {
             last = Some(count);
         }
         self.retry_sd_if_empty(&mut blob);
-        collect_stores(&blob, SD_CTR, INTERNAL_CTR)
+        let files = collect_stores(&blob, SD_CTR, INTERNAL_CTR);
+        self.last_blob = blob;
+        files
     }
 
     /// A store can answer empty because it was not mounted yet; ask the SD once more after a delay.

@@ -19,6 +19,19 @@ pub fn human_size(n: u64) -> String {
     format!("{v:.1} {unit}")
 }
 
+/// `3.0 MiB / 6.0 MiB (50%)`, or `3.0 MiB / ?` when the size is unknown.
+pub fn progress_line(done: u64, total: Option<u64>) -> String {
+    match total.filter(|t| *t > 0) {
+        Some(t) => format!(
+            "{} / {} ({}%)",
+            human_size(done),
+            human_size(t),
+            (done * 100 / t).min(100)
+        ),
+        None => format!("{} / ?", human_size(done)),
+    }
+}
+
 pub fn format_listing(files: &[CameraFile]) -> String {
     if files.is_empty() {
         return "no files".to_string();
@@ -87,6 +100,19 @@ mod tests {
         assert!(cols.windows(2).all(|w| w[0] == w[1]), "{cols:?}\n{out}");
         assert!(out.contains("sd") && out.contains("internal"));
         assert!(out.contains("1.5 KiB") && out.contains("3.0 GiB"));
+    }
+
+    #[test]
+    fn progress_line_shows_percentage_or_unknown_total() {
+        assert_eq!(
+            progress_line(3_145_728, Some(6_291_456)),
+            "3.0 MiB / 6.0 MiB (50%)"
+        );
+        assert_eq!(progress_line(1_048_576, None), "1.0 MiB / ?");
+        assert_eq!(
+            progress_line(7_000_000, Some(6_000_000)),
+            "6.7 MiB / 5.7 MiB (100%)"
+        );
     }
 
     #[test]

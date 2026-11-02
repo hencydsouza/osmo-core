@@ -188,6 +188,11 @@ fn lists_oa4_newest_page_from_fixture_in_the_documented_order() {
     let mut s = session(cam);
     let files = s.list_newest().unwrap();
     assert_eq!(files.len(), 45);
+    assert_eq!(
+        decode_manifest(s.last_blob()).len(),
+        45,
+        "the retained raw blob re-decodes offline, so a live capture can become a fixture"
+    );
     assert!(files
         .iter()
         .any(|f| f.name == "DJI_20260903165023_0012_D.JPG"));
