@@ -60,3 +60,15 @@ fn the_four_longest_videos_carry_size_zero_in_the_manifest() {
         assert_eq!(find(&f, stem).size_bytes, 0, "{stem}");
     }
 }
+
+#[test]
+fn live_listing_handles_follow_the_action4_fit() {
+    for f in files() {
+        let want = 0x40000 + f.seq * 0x10;
+        assert_eq!(f.handle, want, "{}", f.name);
+        assert_eq!(f.cmd_handle, want, "{}", f.name);
+        assert!(f.deletable(), "{}", f.name);
+        let n: u32 = f.name.split('_').nth(2).unwrap().parse().unwrap();
+        assert_eq!(f.seq, n, "{}", f.name);
+    }
+}

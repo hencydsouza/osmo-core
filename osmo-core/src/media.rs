@@ -13,13 +13,30 @@ pub struct CameraFile {
     pub storage: u8,
     /// Full size in bytes from the manifest; 0 = unknown.
     pub size_bytes: u64,
-    /// Camera-assigned handle from the record's fixed marker (videos only); 0 = unknown.
+    /// Camera-assigned handle used to address the file in delete and paging; 0 = unknown. Videos carry it at
+    /// their marker; a still gets one only when the per-list fit vouches for the record's own candidate.
     pub handle: u32,
     /// Which of the manifest's concatenated per-store lists the record came from (0 first, 1 second).
     pub group: u8,
+    /// The 4-digit shot number in the name (`..._0014_D.MP4` is 14); 0 if the name has none.
+    pub seq: u32,
+    /// `base + seq * step`, fitted over the list's own confirmed handles; 0 if the list could not be fitted.
+    /// Favourite uses this; delete never does.
+    pub cmd_handle: u32,
+    /// The value at the record's fixed handle position, before anything has vouched for it.
+    pub handle_candidate: u32,
+    /// Another record in the same list holds this file's handle, so delete could hit the wrong file.
+    pub handle_shared: bool,
+    /// The camera's favourite flag.
+    pub starred: bool,
 }
 
 impl CameraFile {
+    /// A delete command can name this file safely: it has a verified handle that nobody else holds.
+    pub fn deletable(&self) -> bool {
+        self.handle != 0 && !self.handle_shared
+    }
+
     /// Path of the original on the camera's HTTP file API. The path is deliberately not percent-encoded.
     pub fn url_path(&self) -> String {
         url_path(self.storage, &self.path)

@@ -32,6 +32,36 @@ pub fn progress_line(done: u64, total: Option<u64>) -> String {
     }
 }
 
+/// One line like the camera's own screen: `battery 87%  SD 107.2 GiB free of 118.9 GiB`. Absent or zero-capacity
+/// fields are omitted; an empty status gives `""`.
+pub fn format_status(s: &osmo_core::status::Status) -> String {
+    let gib = |mb: u32| mb as f64 / 1024.0;
+    let mut parts: Vec<String> = Vec::new();
+    if let Some(b) = s.battery_percent {
+        let charging = if s.charging == Some(true) {
+            " (charging)"
+        } else {
+            ""
+        };
+        parts.push(format!("battery {b}%{charging}"));
+    }
+    for (label, total, free) in [
+        ("SD", s.sd_total_mb, s.sd_free_mb),
+        ("internal", s.internal_total_mb, s.internal_free_mb),
+    ] {
+        if let (Some(total), Some(free)) = (total, free) {
+            if total > 0 {
+                parts.push(format!(
+                    "{label} {:.1} GiB free of {:.1} GiB",
+                    gib(free),
+                    gib(total)
+                ));
+            }
+        }
+    }
+    parts.join("  ")
+}
+
 /// What to tell the user when a download gave up. A stall is nearly always the camera's WiFi going to sleep.
 pub fn download_error_message(e: &osmo_core::http::DownloadError) -> String {
     match e {
@@ -112,6 +142,11 @@ mod tests {
             size_bytes: size,
             handle: 0,
             group: 0,
+            seq: 0,
+            cmd_handle: 0,
+            handle_candidate: 0,
+            handle_shared: false,
+            starred: false,
         }
     }
 
@@ -195,6 +230,40 @@ mod tests {
             io.contains("disk full") && !io.contains("osmo wifi"),
             "{io}"
         );
+    }
+
+    #[test]
+    fn format_status_shows_battery_and_free_space_like_the_camera_screen() {
+        let s = osmo_core::status::Status {
+            battery_percent: Some(87),
+            sd_total_mb: Some(121_785),
+            sd_free_mb: Some(109_748),
+            ..Default::default()
+        };
+        assert_eq!(
+            format_status(&s),
+            "battery 87%  SD 107.2 GiB free of 118.9 GiB"
+        );
+    }
+
+    #[test]
+    fn format_status_omits_what_is_absent_or_zero_and_marks_charging() {
+        use osmo_core::status::Status;
+        assert_eq!(format_status(&Status::default()), "");
+        let s = Status {
+            battery_percent: Some(40),
+            charging: Some(true),
+            sd_total_mb: Some(0),
+            internal_total_mb: Some(0),
+            ..Default::default()
+        };
+        assert_eq!(format_status(&s), "battery 40% (charging)");
+        let both = Status {
+            internal_total_mb: Some(48_980),
+            internal_free_mb: Some(10_240),
+            ..Default::default()
+        };
+        assert_eq!(format_status(&both), "internal 10.0 GiB free of 47.8 GiB");
     }
 
     #[test]

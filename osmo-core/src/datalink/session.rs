@@ -7,6 +7,7 @@ use super::transport::{Datagram, Transport, UdpPeer};
 use crate::duml::commands::{set_pairing_pin, APP_DEVICE_INFO, DEFAULT_IDENTIFIER};
 use crate::duml::{find_reply, scan_frames};
 use crate::media::CameraFile;
+use crate::status::Status;
 use std::io;
 use std::net::{SocketAddr, TcpStream};
 use std::time::{Duration, Instant};
@@ -209,6 +210,7 @@ pub struct CameraSession<D: Datagram> {
     last_presence: Instant,
     last_blob: Vec<u8>,
     logger: Option<Logger>,
+    status: Status,
 }
 
 impl CameraSession<UdpPeer> {
@@ -241,6 +243,7 @@ impl<D: Datagram> CameraSession<D> {
             last_presence: Instant::now(),
             last_blob: Vec::new(),
             logger: None,
+            status: Status::default(),
         }
     }
 
@@ -253,6 +256,11 @@ impl<D: Datagram> CameraSession<D> {
         if let Some(l) = self.logger.as_mut() {
             l(msg.as_ref());
         }
+    }
+
+    /// Battery and storage as last pushed by the camera.
+    pub fn status(&self) -> &Status {
+        &self.status
     }
 
     pub fn base_seq(&self) -> u16 {
@@ -295,6 +303,7 @@ impl<D: Datagram> CameraSession<D> {
                     ]);
                     self.playback_reported = Some(flags & 0x4000_0000 != 0);
                 }
+                self.status.apply(f.set, f.cmd, &f.payload);
             }
         }
     }
