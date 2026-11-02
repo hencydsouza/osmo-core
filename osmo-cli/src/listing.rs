@@ -112,6 +112,11 @@ mod tests {
             size_bytes: size,
             handle: 0,
             group: 0,
+            seq: 0,
+            cmd_handle: 0,
+            handle_candidate: 0,
+            handle_shared: false,
+            starred: false,
         }
     }
 

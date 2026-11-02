@@ -32,14 +32,29 @@ fn every_golden_fixture_matches_name_ext_size_group() {
         let raw = fs::read(format!("{}/{name}", dir())).unwrap();
         let mut got: Vec<String> = decode_manifest(&raw)
             .iter()
-            .map(|f| format!("{}|{}|{}|{}", f.name, f.ext, f.size_bytes, f.group))
+            .map(|f| {
+                format!(
+                    "{}|{}|{:08x}|{:08x}|{}|{}|{}|{}",
+                    f.name,
+                    f.ext,
+                    f.handle,
+                    f.cmd_handle,
+                    f.size_bytes,
+                    f.starred,
+                    f.group,
+                    f.deletable()
+                )
+            })
             .collect();
         let golden = fs::read_to_string(format!("{}/golden/{name}.golden.txt", dir())).unwrap();
         let mut want: Vec<String> = golden
             .lines()
             .map(|l| {
                 let c: Vec<&str> = l.split('|').collect();
-                format!("{}|{}|{}|{}", c[0], c[1], c[4], c[10])
+                format!(
+                    "{}|{}|{}|{}|{}|{}|{}|{}",
+                    c[0], c[1], c[2], c[3], c[4], c[8], c[10], c[11]
+                )
             })
             .collect();
         got.sort();
