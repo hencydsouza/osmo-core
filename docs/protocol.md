@@ -32,6 +32,9 @@ BLE pair -> read WiFi credentials -> (user joins the camera's WiFi) -> TCP-7001 
 - **Datalink sequencing:** every packet carries `[ack = my previous seq][my seq]` in our own sequence space, and
   the 34-byte window ack echoes the peer's own cursors. Wrong values here silently drop writes while reads keep
   working (two historical outages in Osmosis).
+- **Playback mode:** the list is only complete in playback. `0x02/0x0c` works on most bodies; the Action 4 and
+  Pocket 3 answer `e0` and need `0x01/0x01` (about six prelude frames, then the enter payload at ~20 Hz). The
+  camera's own bit 30 in `0x02/0x80` is the only completion signal. In capture, the list is empty or partial.
 - **Manifest:** select reply chunks by DUML command `0x00/0x27`, never by the `4A 01` payload prefix (parameter
   pushes share it). A store that is not mounted yet answers empty: wait ~1.7 s after playback and re-ask the SD once.
 - **HTTP:** the camera cuts long transfers about every 10 s and answers 404/500 when merely busy. Resume with a
@@ -40,4 +43,4 @@ BLE pair -> read WiFi credentials -> (user joins the camera's WiFi) -> TCP-7001 
 ## Not implemented (by design, for now)
 
 Time sync, delete, favourite, burst/highlights, thumbnails, trimmed download, RTMP livestream, GPS sync, drones,
-the `0x01/0x01` playback route, paging beyond the newest 45 files per store, Xtra rebadges, auto WiFi join.
+paging beyond the newest 45 files per store, Xtra rebadges, auto WiFi join.

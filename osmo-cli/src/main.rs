@@ -6,7 +6,7 @@ use osmo_cli::listing::{
 };
 use osmo_cli::{config, route::route_warning};
 use osmo_core::ble::{model_name, pair_and_read_wifi, PairOptions};
-use osmo_core::datalink::{CameraSession, SessionConfig, SessionError};
+use osmo_core::datalink::{has_media_records, CameraSession, SessionConfig, SessionError};
 use osmo_core::http::{HttpClient, Outcome};
 use osmo_core::media::url_path;
 use std::net::{IpAddr, UdpSocket};
@@ -22,6 +22,9 @@ const CAMERA_IP: &str = "192.168.2.1";
 #[derive(Parser)]
 #[command(name = "osmo", about = "Talk to DJI Osmo cameras")]
 struct Cli {
+    /// Print protocol events (handshake, playback route, each list batch) to stderr.
+    #[arg(short, long, global = true)]
+    verbose: bool,
     #[command(subcommand)]
     cmd: Cmd,
 }
@@ -97,23 +100,42 @@ fn warn_route(ip: &str, port: u16) {
 fn open_session(
     ip: &str,
     port: u16,
+    verbose: bool,
 ) -> Result<CameraSession<osmo_core::datalink::UdpPeer>, String> {
     warn_route(ip, port);
     let cfg = SessionConfig {
         port,
         ..SessionConfig::action4(ip)
     };
-    CameraSession::open(&cfg).map_err(session_err)
+    let mut s = CameraSession::open(&cfg).map_err(session_err)?;
+    if verbose {
+        s.set_logger(|l| eprintln!("  {l}"));
+    }
+    Ok(s)
 }
 
-fn ls_cmd(ip: &str, port: u16, dump: Option<&PathBuf>) -> Result<(), String> {
-    let mut s = open_session(ip, port)?;
+fn warn_if_unconfirmed(s: &CameraSession<osmo_core::datalink::UdpPeer>) {
+    if !s.diagnostics().playback_confirmed {
+        eprintln!("warning: the camera did not report playback mode, so the list may be empty or incomplete; run it again (add -v to see why)");
+    }
+}
+
+fn ls_cmd(ip: &str, port: u16, dump: Option<&PathBuf>, verbose: bool) -> Result<(), String> {
+    let mut s = open_session(ip, port, verbose)?;
     eprintln!("Listing {ip}:{port} ...");
     let files = s.list_newest().map_err(session_err);
+    warn_if_unconfirmed(&s);
     if let Some(path) = dump {
-        std::fs::write(path, s.last_blob())
-            .map_err(|e| format!("could not write {}: {e}", path.display()))?;
-        eprintln!("Raw manifest saved to {}", path.display());
+        if has_media_records(s.last_blob()) {
+            std::fs::write(path, s.last_blob())
+                .map_err(|e| format!("could not write {}: {e}", path.display()))?;
+            eprintln!("Raw manifest saved to {}", path.display());
+        } else {
+            eprintln!(
+                "Not saving {}: this run captured no media records (keeping any earlier dump).",
+                path.display()
+            );
+        }
     }
     s.close();
     println!("{}", format_listing(&files?));
@@ -127,6 +149,7 @@ fn get_cmd(
     port: u16,
     storage: Option<u8>,
     keepalive: bool,
+    verbose: bool,
 ) -> Result<(), String> {
     let path = validate_get_path(path)?;
     let http = HttpClient::new(ip);
@@ -136,9 +159,10 @@ fn get_cmd(
             (s, http.head(&url_path(s, path)), None)
         }
         None => {
-            let mut sess = open_session(ip, port)?;
+            let mut sess = open_session(ip, port, verbose)?;
             eprintln!("Looking up {path} ...");
             let files = sess.list_newest().map_err(session_err)?;
+            warn_if_unconfirmed(&sess);
             let f = find_file(&files, path)
                 .ok_or("not in the camera's newest listing: pass --storage N to fetch by path")?;
             (f.storage, Some(f.size_bytes).filter(|s| *s > 0), Some(sess))
@@ -223,7 +247,7 @@ fn pair_cmd(
 fn run() -> Result<(), String> {
     let cli = Cli::parse();
     match cli.cmd {
-        Cmd::Ls { ip, port, dump } => ls_cmd(&ip, port, dump.as_ref()),
+        Cmd::Ls { ip, port, dump } => ls_cmd(&ip, port, dump.as_ref(), cli.verbose),
         Cmd::Get {
             path,
             out,
@@ -231,7 +255,7 @@ fn run() -> Result<(), String> {
             port,
             storage,
             keepalive,
-        } => get_cmd(&path, &out, &ip, port, storage, keepalive),
+        } => get_cmd(&path, &out, &ip, port, storage, keepalive, cli.verbose),
         ble_cmd => {
             let rt = Arc::new(Runtime::new().map_err(|e| e.to_string())?);
             let adapter = ble_btleplug::adapter(&rt)?;

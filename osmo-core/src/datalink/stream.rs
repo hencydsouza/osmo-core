@@ -125,6 +125,12 @@ pub fn streams_ended(raw: &[u8], required: &[u8]) -> bool {
     required.iter().all(closed) && tally.keys().all(closed)
 }
 
+/// Does this blob contain at least one media record? A run that only carried status pushes (the camera
+/// never answered the list query) must not be mistaken for, or overwrite, a real capture.
+pub fn has_media_records(raw: &[u8]) -> bool {
+    count_media_paths(&manifest_bytes(raw, None)) > 0
+}
+
 /// The `0c 01 0d` run: the camera's "nothing older" marker before the last record's name field.
 pub fn has_end_marker(bytes: &[u8]) -> bool {
     bytes.windows(3).any(|w| w == [0x0C, 0x01, 0x0D])
@@ -240,6 +246,15 @@ mod tests {
         raw.extend(chunk(0x00, 0x27, 1, 0x01, b"real"));
         assert_eq!(manifest_bytes(&raw, Some(1)), b"real");
         assert!(chunk_tally(&raw)[&1].get(&0x01) == Some(&1));
+    }
+
+    #[test]
+    fn has_media_records_tells_a_listing_from_status_noise() {
+        assert!(has_media_records(&fx("nano_45.bin")));
+        assert!(has_media_records(&fx("oa4_45.bin")));
+        assert!(!has_media_records(&[]));
+        let noise = chunk(0x02, 0x80, 1, 0x01, b"not a manifest");
+        assert!(!has_media_records(&noise));
     }
 
     #[test]

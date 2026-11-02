@@ -26,9 +26,31 @@ struct FakeCamera {
     inbox: VecDeque<Vec<u8>>,
     log: Log,
     answer_handshake: bool,
-    playback: bool,
+    playback: Playback,
     on_list: OnList,
     list_counts: [usize; 4],
+}
+
+#[derive(Clone, Copy, PartialEq)]
+enum Playback {
+    /// `0x02/0x0C` works (most cameras).
+    Works,
+    /// Action 4 / Pocket 3: `0x02/0x0C` is refused with `e0`; only `0x01/0x01` enters playback.
+    RefusesUntilControl,
+    /// The camera never reports playback.
+    Never,
+}
+
+fn refusal() -> Vec<u8> {
+    wrap(
+        Frame {
+            target: 0x0201,
+            id: 1,
+            ty: 0xC0 | 0x02 << 8 | 0x0C << 16,
+            payload: vec![0xE0],
+        }
+        .encode(),
+    )
 }
 
 fn wrap(frame: Vec<u8>) -> Vec<u8> {
@@ -104,7 +126,7 @@ impl FakeCamera {
                 inbox: VecDeque::new(),
                 log: log.clone(),
                 answer_handshake: true,
-                playback: true,
+                playback: Playback::Works,
                 on_list,
                 list_counts: [0; 4],
             },
@@ -135,7 +157,17 @@ impl Datagram for FakeCamera {
         if pkt_type == 5 {
             let f = Frame::decode(&pkt[20..]).expect("session sent a malformed DUML frame");
             (s.set, s.cmd, s.payload) = (f.cmd_set(), f.cmd_id(), f.payload.clone());
-            if (s.set, s.cmd) == (0x02, 0x0C) && s.payload == [1, 1, 0, 1] && self.playback {
+            if (s.set, s.cmd) == (0x02, 0x0C) && s.payload == [1, 1, 0, 1] {
+                match self.playback {
+                    Playback::Works => self.inbox.push_back(playback_status()),
+                    Playback::RefusesUntilControl => self.inbox.push_back(refusal()),
+                    Playback::Never => {}
+                }
+            }
+            if (s.set, s.cmd) == (0x01, 0x01)
+                && s.payload.first() == Some(&0x00)
+                && self.playback == Playback::RefusesUntilControl
+            {
                 self.inbox.push_back(playback_status());
             }
             if (s.set, s.cmd) == (0x00, 0x26)
@@ -297,6 +329,103 @@ fn empty_sd_is_requeried_once_and_the_retry_is_used() {
     assert_eq!(sd_queries, 2);
 }
 
+const PRELUDE: [u8; 11] = [0x03, 0, 0, 0, 0, 0x04, 0, 0, 0, 0x07, 0x01];
+const ENTER: [u8; 11] = [0x00, 0, 0, 0, 0, 0x04, 0, 0, 0, 0x04, 0x01];
+
+#[test]
+fn action4_refuses_0x02_0x0c_and_enters_playback_via_0x01_0x01() {
+    let frames = manifest_frames(&fixture("oa4_45.bin"), 1);
+    let (mut cam, log) = FakeCamera::new(Box::new(move |ctr, n| {
+        if ctr == 1 && n == 0 {
+            frames.clone()
+        } else {
+            vec![]
+        }
+    }));
+    cam.playback = Playback::RefusesUntilControl;
+    let mut s = session(cam);
+    let lines: Arc<Mutex<Vec<String>>> = Arc::default();
+    let sink = lines.clone();
+    s.set_logger(move |l| sink.lock().unwrap().push(l.to_string()));
+    let files = s.list_newest().unwrap();
+    let log_text = lines.lock().unwrap().join("\n");
+    for want in [
+        "handshake ok",
+        "0x02/0x0C refused",
+        "held via 0x01/0x01",
+        "files",
+    ] {
+        assert!(
+            log_text.contains(want),
+            "log is missing {want:?}:\n{log_text}"
+        );
+    }
+    assert_eq!(files.len(), 45);
+    assert!(
+        s.playback_held(),
+        "the camera's own playback bit is the only completion signal"
+    );
+
+    let d = duml(&log);
+    let enter_0c = d
+        .iter()
+        .filter(|(a, b, _)| (*a, *b) == (0x02, 0x0C))
+        .count();
+    assert_eq!(
+        enter_0c, 1,
+        "a refusal is definitive: no point re-sending 0x02/0x0C"
+    );
+    let control: Vec<&Vec<u8>> = d
+        .iter()
+        .filter(|(a, b, _)| (*a, *b) == (0x01, 0x01))
+        .map(|(_, _, p)| p)
+        .collect();
+    assert!(
+        control.len() >= 7,
+        "6 prelude frames then the enter payload: {}",
+        control.len()
+    );
+    assert!(
+        control[..6].iter().all(|p| **p == PRELUDE),
+        "first six frames are the prelude"
+    );
+    assert_eq!(control[6], &ENTER.to_vec());
+    let first_control = d
+        .iter()
+        .position(|(a, b, _)| (*a, *b) == (0x01, 0x01))
+        .unwrap();
+    let first_list = d
+        .iter()
+        .position(|(a, b, p)| (*a, *b) == (0, 0x26) && p.len() > 20)
+        .unwrap();
+    assert!(
+        first_control < first_list,
+        "playback is entered before the first list query"
+    );
+}
+
+#[test]
+fn playback_never_confirmed_is_reported_and_bounded() {
+    let frames = manifest_frames(&fixture("oa4_6.bin"), 1);
+    let (mut cam, _log) = FakeCamera::new(Box::new(move |ctr, n| {
+        if ctr == 1 && n == 0 {
+            frames.clone()
+        } else {
+            vec![]
+        }
+    }));
+    cam.playback = Playback::Never;
+    let mut s = session(cam);
+    let t = Instant::now();
+    s.list_newest().unwrap();
+    assert!(!s.playback_held());
+    assert!(
+        !s.diagnostics().playback_confirmed,
+        "the CLI warns that the listing may be incomplete"
+    );
+    assert!(t.elapsed() < Duration::from_secs(5));
+}
+
 #[test]
 fn unconfirmed_playback_is_not_fatal() {
     let frames = manifest_frames(&fixture("oa4_6.bin"), 1);
@@ -307,7 +436,7 @@ fn unconfirmed_playback_is_not_fatal() {
             vec![]
         }
     }));
-    cam.playback = false;
+    cam.playback = Playback::Never;
     let mut s = session(cam);
     assert!(!s.list_newest().unwrap().is_empty());
     assert!(!s.playback_held());
