@@ -10,4 +10,4 @@ rand = "0.8"
 ureq = "2"
 
 [dev-dependencies]
-tiny_http = "0.12"
+tempfile = "3"

@@ -2,7 +2,7 @@
 //! newest-page file list. Ported from Osmosis `DumlSession.kt` / `CameraSession.kt` for the Action 4
 //! path (single page, no delete/favourite/burst, no time sync, no `0x01/0x01` playback route).
 use super::manifest::collect_stores;
-use super::stream::{count_media_paths, manifest_bytes, streams_ended};
+use super::stream::{chunk_tally, count_media_paths, manifest_bytes, streams_ended};
 use super::transport::{Datagram, Transport, UdpPeer};
 use crate::duml::commands::{set_pairing_pin, APP_DEVICE_INFO, DEFAULT_IDENTIFIER};
 use crate::duml::{find_reply, scan_frames};
@@ -29,6 +29,12 @@ const PARAM_SUBS: [&str; 8] = [
 ];
 const ENTER_PLAYBACK: [u8; 4] = [1, 1, 0, 1];
 const LEAVE_PLAYBACK: [u8; 4] = [1, 1, 0, 0];
+/// `0x01/0x01` playback entry (Action 4, Pocket 3): about six prelude frames, then the enter payload at
+/// ~20 Hz until the camera's own playback bit sets (~350 ms in). `cmd_type 0`, no reply.
+const CONTROL_PRELUDE: [u8; 11] = [0x03, 0, 0, 0, 0, 0x04, 0, 0, 0, 0x07, 0x01];
+const CONTROL_ENTER: [u8; 11] = [0x00, 0, 0, 0, 0, 0x04, 0, 0, 0, 0x04, 0x01];
+const CONTROL_PRELUDE_FRAMES: u32 = 6;
+const CONTROL_SILENT_LIMIT: u32 = 8;
 const LIST_TRIGGER: [u8; 14] = [0x4a, 0x04, 0x0e, 0x10, 0x01, 0, 0, 0, 0, 0, 0x01, 0, 0, 0];
 const NEWEST_SD: u32 = 0x0000_0001;
 const NEWEST_INTERNAL: u32 = 0x4000_0001;
@@ -118,6 +124,9 @@ pub struct Timing {
     pub poll: Duration,
     pub playback_probe: Duration,
     pub playback_attempt: Duration,
+    /// How long to keep sending `0x01/0x01` before giving up on playback.
+    pub control_window: Duration,
+    pub control_poll: Duration,
     /// A store is not mounted the instant playback is confirmed; allow about 1.7 s before the first query.
     pub playback_settle: Duration,
     pub batch: Duration,
@@ -138,6 +147,8 @@ impl Default for Timing {
             poll: ms(100),
             playback_probe: ms(120),
             playback_attempt: ms(900),
+            control_window: ms(2500),
+            control_poll: ms(50),
             playback_settle: ms(1700),
             batch: ms(800),
             retry_batch: ms(700),
@@ -160,6 +171,8 @@ impl Timing {
             poll: ms(1),
             playback_probe: ms(2),
             playback_attempt: ms(20),
+            control_window: ms(60),
+            control_poll: ms(1),
             playback_settle: ms(2),
             batch: ms(3),
             retry_batch: ms(3),
@@ -177,6 +190,16 @@ pub enum SessionError {
     Io(#[from] io::Error),
 }
 
+type Logger = Box<dyn FnMut(&str) + Send>;
+
+/// What the last listing observed, so callers can warn instead of silently showing a partial list.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Diagnostics {
+    /// The camera itself reported playback mode (bit 30 of `0x02/0x80`). Without it a camera still in
+    /// capture answers the list with nothing or a partial page.
+    pub playback_confirmed: bool,
+}
+
 pub struct CameraSession<D: Datagram> {
     tx: Transport<D>,
     addr: String,
@@ -184,6 +207,8 @@ pub struct CameraSession<D: Datagram> {
     playback_reported: Option<bool>,
     playback_held: bool,
     last_presence: Instant,
+    last_blob: Vec<u8>,
+    logger: Option<Logger>,
 }
 
 impl CameraSession<UdpPeer> {
@@ -214,6 +239,19 @@ impl<D: Datagram> CameraSession<D> {
             playback_reported: None,
             playback_held: false,
             last_presence: Instant::now(),
+            last_blob: Vec::new(),
+            logger: None,
+        }
+    }
+
+    /// Receive one line per protocol event (handshake, playback route, each batch, per-store counts).
+    pub fn set_logger(&mut self, f: impl FnMut(&str) + Send + 'static) {
+        self.logger = Some(Box::new(f));
+    }
+
+    fn log(&mut self, msg: impl AsRef<str>) {
+        if let Some(l) = self.logger.as_mut() {
+            l(msg.as_ref());
         }
     }
 
@@ -221,8 +259,21 @@ impl<D: Datagram> CameraSession<D> {
         self.tx.base_seq()
     }
 
+    pub fn diagnostics(&self) -> Diagnostics {
+        Diagnostics {
+            playback_confirmed: self.playback_held,
+        }
+    }
+
     pub fn playback_held(&self) -> bool {
         self.playback_held
+    }
+
+    /// Raw reply datagrams of the last listing. Re-decodable with `decode_manifest`, so a live capture
+    /// can be turned into a regression fixture. Holds file names and sizes plus the camera's status pushes
+    /// (device info, firmware, battery), so review it before sharing.
+    pub fn last_blob(&self) -> &[u8] {
+        &self.last_blob
     }
 
     fn recv(&mut self, dur: Duration) -> Vec<Vec<u8>> {
@@ -252,6 +303,19 @@ impl<D: Datagram> CameraSession<D> {
         self.tx.send_duml(set, cmd, payload, recv_type, recv_id, 2);
     }
 
+    fn send_typed(
+        &mut self,
+        set: u8,
+        cmd: u8,
+        payload: &[u8],
+        recv_type: u8,
+        recv_id: u8,
+        cmd_type: u8,
+    ) {
+        self.tx
+            .send_duml(set, cmd, payload, recv_type, recv_id, cmd_type);
+    }
+
     fn beat(&mut self) {
         self.send(0x00, 0x88, &APP_PRESENCE, 0x08, 1);
         self.last_presence = Instant::now();
@@ -277,6 +341,17 @@ impl<D: Datagram> CameraSession<D> {
             self.settle(self.timing.drain_wait);
         }
         self.tx.sync_seq_to_peer_channel();
+        let (sess, base, chan) = (
+            self.tx.session(),
+            self.tx.base_seq(),
+            self.tx.peer_channel(),
+        );
+        self.log(format!(
+            "datalink: handshake ok session=0x{sess:04x} base=0x{base:04x} channel=0x{chan:04x}"
+        ));
+        if chan != base {
+            self.log("datalink: the camera answered on its own sequence channel, not the base we proposed: it may be holding a session from a previous connection");
+        }
 
         self.tx.send_duml(0x00, 0x81, &APP_DEVICE_INFO, 0x08, 2, 4);
         self.settle(self.timing.reg_wait);
@@ -296,12 +371,15 @@ impl<D: Datagram> CameraSession<D> {
         Ok(())
     }
 
-    /// Enter playback mode and wait for the camera itself to say so (bit 30 of `0x02/0x80`); the
-    /// command's own ack only means "received". Not fatal if it never confirms.
+    /// Enter playback mode and wait for the camera itself to say so (bit 30 of `0x02/0x80`); a command's
+    /// own ack only means "received". Tries `0x02/0x0C` first; a refusal (`e0`, as the Action 4 and
+    /// Pocket 3 answer) or no change falls through to the `0x01/0x01` route. Not fatal if neither works,
+    /// but a camera still in capture serves an empty or partial list.
     fn enter_playback(&mut self) -> bool {
         self.recv(self.timing.playback_probe);
         if self.playback_reported == Some(true) {
             self.playback_held = true;
+            self.log("playback: already held (the camera says so)");
             return true;
         }
         for _ in 0..3 {
@@ -311,14 +389,51 @@ impl<D: Datagram> CameraSession<D> {
                 let dg = self.recv(self.timing.poll);
                 if self.playback_reported == Some(true) {
                     self.playback_held = true;
+                    self.log("playback: held via 0x02/0x0C");
                     return true;
                 }
-                if find_reply(&dg, 0x02, 0x0C).is_some_and(|r| r[0] != 0) {
-                    return false;
+                if let Some(r) = find_reply(&dg, 0x02, 0x0C).filter(|r| r[0] != 0) {
+                    // A refusal is definitive: re-sending a command the body does not implement cannot help.
+                    self.log(format!(
+                        "playback: 0x02/0x0C refused (0x{:02x}), trying 0x01/0x01",
+                        r[0]
+                    ));
+                    return self.enter_playback_via_control();
                 }
                 self.tx.send_ack();
             }
         }
+        self.enter_playback_via_control()
+    }
+
+    fn enter_playback_via_control(&mut self) -> bool {
+        let end = Instant::now() + self.timing.control_window;
+        let (mut sent, mut silent) = (0u32, 0u32);
+        while Instant::now() < end {
+            let payload = if sent < CONTROL_PRELUDE_FRAMES {
+                CONTROL_PRELUDE
+            } else {
+                CONTROL_ENTER
+            };
+            self.send_typed(0x01, 0x01, &payload, 0x01, 0, 0);
+            sent += 1;
+            let got = self.recv(self.timing.control_poll);
+            if self.playback_reported == Some(true) {
+                self.playback_held = true;
+                self.log(format!("playback: held via 0x01/0x01 after {sent} frames"));
+                return true;
+            }
+            // cmd_type 0 has no reply, so the state bit is the only feedback; stop writing unknown control
+            // commands into a camera that has gone quiet (it may be powering down).
+            silent = if got.is_empty() { silent + 1 } else { 0 };
+            if silent >= CONTROL_SILENT_LIMIT {
+                self.log(format!(
+                    "playback: 0x01/0x01 camera went quiet after {sent} frames, giving up"
+                ));
+                return false;
+            }
+        }
+        self.log(format!("playback: NOT confirmed after {sent} 0x01/0x01 frames: the camera still reports capture"));
         false
     }
 
@@ -362,12 +477,19 @@ impl<D: Datagram> CameraSession<D> {
                 );
             }
             let count = count_media_paths(&manifest_bytes(&blob, None));
+            self.log(format!(
+                "list: batch {batch}: {} bytes, {count} paths, replies by counter {:?}",
+                blob.len(),
+                chunk_tally(&blob)
+            ));
             if batch >= 3 && streams_ended(&blob, &[SD_CTR, INTERNAL_CTR]) {
+                self.log("list: every answer closed by the camera's end frame");
                 break;
             }
             if batch >= 4 && count > 0 && last == Some(count) {
                 stable += 1;
                 if stable >= 2 {
+                    self.log("list: path count stopped growing");
                     break;
                 }
             } else {
@@ -376,7 +498,15 @@ impl<D: Datagram> CameraSession<D> {
             last = Some(count);
         }
         self.retry_sd_if_empty(&mut blob);
-        collect_stores(&blob, SD_CTR, INTERNAL_CTR)
+        let files = collect_stores(&blob, SD_CTR, INTERNAL_CTR);
+        let sd = files.iter().filter(|f| f.storage == 0).count();
+        self.log(format!(
+            "list: {} files (sd {sd}, internal {})",
+            files.len(),
+            files.len() - sd
+        ));
+        self.last_blob = blob;
+        files
     }
 
     /// A store can answer empty because it was not mounted yet; ask the SD once more after a delay.
@@ -384,6 +514,7 @@ impl<D: Datagram> CameraSession<D> {
         if !manifest_bytes(blob, Some(SD_CTR)).is_empty() {
             return;
         }
+        self.log("list: SD answered empty, asking once more (it may not have been mounted yet)");
         self.send(0x00, 0x26, &list_cmd(SD_CTR, NEWEST_SD), 0x01, 0);
         for batch in 0..6 {
             self.collect(blob, self.timing.retry_batch);
@@ -411,12 +542,19 @@ impl<D: Datagram> CameraSession<D> {
         }
     }
 
-    /// Release playback mode (the camera stays in it otherwise) and stop.
+    /// Release playback mode (the camera stays in it otherwise) and stop. Idempotent; also runs on drop, so
+    /// an early return cannot leave the camera in playback.
     pub fn close(&mut self) {
         if self.playback_held {
             self.send(0x02, 0x0C, &LEAVE_PLAYBACK, 0x01, 0);
             self.recv(Duration::from_millis(150));
             self.playback_held = false;
         }
+    }
+}
+
+impl<D: Datagram> Drop for CameraSession<D> {
+    fn drop(&mut self) {
+        self.close();
     }
 }
