@@ -7,6 +7,7 @@ use super::paging::{
 };
 use super::stream::{chunk_tally, count_media_paths, manifest_bytes, streams_ended};
 use super::transport::{Datagram, Transport, UdpPeer};
+use super::writes::{favourite_payload, WriteError};
 use crate::duml::commands::{set_pairing_pin, APP_DEVICE_INFO, DEFAULT_IDENTIFIER};
 use crate::duml::{find_reply, scan_frames};
 use crate::media::CameraFile;
@@ -137,6 +138,11 @@ pub struct Timing {
     pub retry_batch: Duration,
     pub max_batches: u32,
     pub tick: Duration,
+    /// A write is refused on a session registered longer ago than this: the camera stops answering writes on
+    /// old sessions (measured: answered at 45 to 66 s, silent from 74 s; Osmosis refreshes at 40 s).
+    pub write_window: Duration,
+    /// How long to wait for a write's reply before reporting no answer.
+    pub write_reply_wait: Duration,
 }
 
 impl Default for Timing {
@@ -158,6 +164,8 @@ impl Default for Timing {
             retry_batch: ms(700),
             max_batches: 15,
             tick: ms(200),
+            write_window: Duration::from_secs(40),
+            write_reply_wait: Duration::from_secs(2),
         }
     }
 }
@@ -182,6 +190,8 @@ impl Timing {
             retry_batch: ms(3),
             max_batches: 15,
             tick: ms(1),
+            write_window: Duration::from_secs(5),
+            write_reply_wait: ms(30),
         }
     }
 }
@@ -224,6 +234,8 @@ pub struct CameraSession<D: Datagram> {
     more_available: bool,
     last_slices: HashMap<u8, SliceInfo>,
     truncated: bool,
+    registered_at: Option<Instant>,
+    fav_counter: u32,
 }
 
 impl CameraSession<UdpPeer> {
@@ -264,6 +276,8 @@ impl<D: Datagram> CameraSession<D> {
             more_available: false,
             last_slices: HashMap::new(),
             truncated: false,
+            registered_at: None,
+            fav_counter: 1,
         }
     }
 
@@ -409,6 +423,7 @@ impl<D: Datagram> CameraSession<D> {
         for _ in 0..4 {
             self.settle(self.timing.reg_wait);
         }
+        self.registered_at = Some(Instant::now());
         Ok(())
     }
 
@@ -613,6 +628,75 @@ impl<D: Datagram> CameraSession<D> {
         (self.sd_cursor, self.internal_cursor, self.more_available) =
             seed_cursors(&files, &self.last_slices, self.page_size as usize);
         Ok(files)
+    }
+
+    /// How long ago this session finished registering; a write is only attempted while this is within
+    /// `Timing.write_window`.
+    pub fn session_age(&self) -> Duration {
+        self.registered_at.map_or(Duration::MAX, |t| t.elapsed())
+    }
+
+    /// Every write goes through here: the camera itself must report playback (a write outside it is ignored), and
+    /// the session must be young enough for the camera to still answer writes.
+    fn write_guard(&self) -> Result<(), WriteError> {
+        if self.playback_reported != Some(true) {
+            return Err(WriteError::NotInPlayback);
+        }
+        let age = self.session_age();
+        if age > self.timing.write_window {
+            return Err(WriteError::SessionTooOld {
+                age_secs: age.as_secs(),
+            });
+        }
+        Ok(())
+    }
+
+    /// Wait for the camera's reply to a write on `set/cmd`: status 0 is success, anything else a refusal, and
+    /// silence is `NoReply` (never success).
+    fn write_reply(&mut self, set: u8, cmd: u8) -> Result<(), WriteError> {
+        let end = Instant::now() + self.timing.write_reply_wait;
+        while Instant::now() < end {
+            let dg = self.recv(self.timing.poll);
+            if let Some(r) = find_reply(&dg, set, cmd) {
+                let status = if r.len() >= 2 {
+                    u16::from_le_bytes([r[0], r[1]])
+                } else {
+                    r[0] as u16
+                };
+                return if status == 0 {
+                    Ok(())
+                } else {
+                    Err(WriteError::Rejected(status))
+                };
+            }
+            self.tx.send_ack();
+        }
+        Err(WriteError::NoReply)
+    }
+
+    /// Favourite or un-favourite a file (`0x02/0xBF`, addressed by its command handle). Must follow a listing on
+    /// this session, shortly before: it refuses rather than send a write the camera would ignore.
+    pub fn set_favourite(&mut self, file: &CameraFile, on: bool) -> Result<(), WriteError> {
+        if file.cmd_handle == 0 {
+            return Err(WriteError::NoHandle);
+        }
+        self.write_guard()?;
+        let counter = self.fav_counter;
+        self.fav_counter += 1;
+        self.send(
+            0x02,
+            0xBF,
+            &favourite_payload(file.cmd_handle, counter, on),
+            0x01,
+            0,
+        );
+        self.log(format!(
+            "write: favourite 0x{:08x} on={on}",
+            file.cmd_handle
+        ));
+        let result = self.write_reply(0x02, 0xBF);
+        self.log(format!("write: favourite reply {result:?}"));
+        result
     }
 
     /// Find a file by its camera path, walking from the newest page back through older ones until it turns up or

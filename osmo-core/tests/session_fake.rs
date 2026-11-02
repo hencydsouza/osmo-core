@@ -1,7 +1,8 @@
 //! Datalink session against a scripted fake camera that replays the captured manifests.
 //! Fixture-tested only: this proves our side of the protocol, not that a real camera accepts it.
 use osmo_core::datalink::{
-    decode_manifest, tcp_poke_bytes, tcp_poke_to, CameraSession, Datagram, SessionError, Timing,
+    decode_manifest, favourite_payload, tcp_poke_bytes, tcp_poke_to, CameraSession, Datagram,
+    SessionError, Timing, WriteError,
 };
 use osmo_core::duml::commands::DEFAULT_IDENTIFIER;
 use osmo_core::duml::{pack_string, Frame};
@@ -29,6 +30,7 @@ struct FakeCamera {
     playback: Playback,
     on_list: OnList,
     list_counts: [usize; 4],
+    write_replies: Vec<((u8, u8), Vec<u8>)>,
 }
 
 #[derive(Clone, Copy, PartialEq)]
@@ -129,6 +131,7 @@ impl FakeCamera {
                 playback: Playback::Works,
                 on_list,
                 list_counts: [0; 4],
+                write_replies: vec![],
             },
             log,
         )
@@ -178,6 +181,25 @@ impl Datagram for FakeCamera {
                 let n = self.list_counts[ctr as usize];
                 self.list_counts[ctr as usize] += 1;
                 self.inbox.extend((self.on_list)(ctr, n));
+            }
+        }
+        if pkt_type == 5 {
+            if let Some(p) = self
+                .write_replies
+                .iter()
+                .find(|(k, _)| *k == (s.set, s.cmd))
+                .map(|(_, p)| p.clone())
+            {
+                let ty = 0xC0 | (s.set as u32) << 8 | (s.cmd as u32) << 16;
+                self.inbox.push_back(wrap(
+                    Frame {
+                        target: 0x0201,
+                        id: 1,
+                        ty,
+                        payload: p,
+                    }
+                    .encode(),
+                ));
             }
         }
         self.log.lock().unwrap().push(s);
@@ -755,4 +777,124 @@ fn find_file_returns_none_after_exhausting_the_library_and_stops_early_when_foun
         .find_file("DCIM/DJI_001/DOES_NOT_EXIST.MP4")
         .unwrap()
         .is_none());
+}
+
+fn session_with(cam: FakeCamera, timing: Timing) -> CameraSession<FakeCamera> {
+    CameraSession::new(cam, "192.168.2.1:9004".to_string(), timing)
+}
+
+/// A listed session on an Action 4-like fake whose `0x02/0xBF` write is answered with `reply` (None: silence).
+fn writable(
+    reply: Option<Vec<u8>>,
+    playback: Playback,
+    timing: Timing,
+) -> (CameraSession<FakeCamera>, Log, osmo_core::media::CameraFile) {
+    let frames = manifest_frames(&fixture("oa4_45.bin"), 1);
+    let (mut cam, log) = FakeCamera::new(Box::new(move |ctr, n| {
+        if ctr == 1 && n == 0 {
+            frames.clone()
+        } else {
+            vec![]
+        }
+    }));
+    cam.playback = playback;
+    if let Some(p) = reply {
+        cam.write_replies.push(((0x02, 0xBF), p));
+    }
+    let mut s = session_with(cam, timing);
+    let files = s.list_newest().unwrap();
+    let file = files
+        .into_iter()
+        .find(|f| f.cmd_handle != 0)
+        .expect("a file with a command handle");
+    (s, log, file)
+}
+
+fn favourite_frames(log: &Log) -> Vec<Vec<u8>> {
+    duml(log)
+        .into_iter()
+        .filter(|(a, b, _)| (*a, *b) == (0x02, 0xBF))
+        .map(|(_, _, p)| p)
+        .collect()
+}
+
+#[test]
+fn favourite_sends_0x02_0xbf_and_accepts_status_0() {
+    let (mut s, log, file) = writable(
+        Some(vec![0x00]),
+        Playback::RefusesUntilControl,
+        Timing::fast(),
+    );
+    s.set_favourite(&file, true).unwrap();
+    assert_eq!(
+        favourite_frames(&log),
+        vec![favourite_payload(file.cmd_handle, 1, true)]
+    );
+    s.set_favourite(&file, false).unwrap();
+    assert_eq!(
+        favourite_frames(&log)[1],
+        favourite_payload(file.cmd_handle, 2, false),
+        "the counter runs per session"
+    );
+}
+
+#[test]
+fn favourite_rejection_is_reported() {
+    let (mut s, _log, file) = writable(Some(vec![0xE0]), Playback::Works, Timing::fast());
+    assert!(matches!(
+        s.set_favourite(&file, true),
+        Err(WriteError::Rejected(0xE0))
+    ));
+}
+
+#[test]
+fn favourite_with_no_reply_is_no_reply_not_success_and_returns_promptly() {
+    let (mut s, _log, file) = writable(None, Playback::Works, Timing::fast());
+    let t = Instant::now();
+    assert!(matches!(
+        s.set_favourite(&file, true),
+        Err(WriteError::NoReply)
+    ));
+    assert!(t.elapsed() < Duration::from_secs(2));
+}
+
+#[test]
+fn a_write_on_an_old_session_is_refused_without_sending() {
+    let old = Timing {
+        write_window: Duration::from_millis(1),
+        ..Timing::fast()
+    };
+    let (mut s, log, file) = writable(Some(vec![0x00]), Playback::Works, old);
+    assert!(matches!(
+        s.set_favourite(&file, true),
+        Err(WriteError::SessionTooOld { .. })
+    ));
+    assert!(
+        favourite_frames(&log).is_empty(),
+        "nothing was sent on a session the camera would ignore"
+    );
+}
+
+#[test]
+fn a_file_without_a_command_handle_is_refused_without_sending() {
+    let (mut s, log, file) = writable(Some(vec![0x00]), Playback::Works, Timing::fast());
+    let no_handle = osmo_core::media::CameraFile {
+        cmd_handle: 0,
+        ..file
+    };
+    assert!(matches!(
+        s.set_favourite(&no_handle, true),
+        Err(WriteError::NoHandle)
+    ));
+    assert!(favourite_frames(&log).is_empty());
+}
+
+#[test]
+fn a_write_outside_playback_is_refused_without_sending() {
+    let (mut s, log, file) = writable(Some(vec![0x00]), Playback::Never, Timing::fast());
+    assert!(matches!(
+        s.set_favourite(&file, true),
+        Err(WriteError::NotInPlayback)
+    ));
+    assert!(favourite_frames(&log).is_empty());
 }

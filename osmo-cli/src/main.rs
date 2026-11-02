@@ -81,6 +81,17 @@ enum Cmd {
         #[arg(long)]
         storage: Option<u8>,
     },
+    /// Favourite (star) a file on the camera, or un-star it with --off. PATH is the camera path as `osmo ls` prints it.
+    Star {
+        path: String,
+        /// Remove the star instead of adding it.
+        #[arg(long)]
+        off: bool,
+        #[arg(long, default_value = CAMERA_IP)]
+        ip: String,
+        #[arg(long, default_value_t = 9004)]
+        port: u16,
+    },
     /// Download one file, resuming a partial one. PATH is the camera path exactly as `osmo ls` prints it.
     Get {
         path: String,
@@ -212,6 +223,42 @@ fn ls_cmd(
     }
     s.close();
     println!("{}", format_listing(&files?));
+    Ok(())
+}
+
+fn star_cmd(path: &str, on: bool, ip: &str, port: u16, verbose: bool) -> Result<(), String> {
+    let path = validate_get_path(path)?;
+    {
+        let mut sess = open_session(ip, port, verbose)?;
+        eprintln!("Looking up {path} ...");
+        let found = sess.find_file(path).map_err(session_err)?;
+        warn_if_unconfirmed(&sess);
+        let file = found.ok_or(
+            "not found anywhere in the camera's library: check the path against `osmo ls --all`",
+        )?;
+        eprintln!("Sending favourite {} ...", if on { "on" } else { "off" });
+        sess.set_favourite(&file, on).map_err(|e| e.to_string())?;
+        println!(
+            "The camera accepted it: {path} {}",
+            if on {
+                "is now starred"
+            } else {
+                "is no longer starred"
+            }
+        );
+    }
+    // Confirm on a fresh session: a second handshake on the same transport is not attempted.
+    let mut check = open_session(ip, port, verbose)?;
+    match check.find_file(path).map_err(session_err)? {
+        Some(f) if f.starred == on => println!(
+            "A fresh listing confirms it ({}).",
+            if on { "starred" } else { "not starred" }
+        ),
+        Some(_) => eprintln!(
+            "warning: a fresh listing does not show the change yet; run `osmo ls` to check"
+        ),
+        None => eprintln!("warning: could not find the file again to confirm"),
+    }
     Ok(())
 }
 
@@ -456,6 +503,12 @@ fn run() -> Result<(), String> {
             port,
             storage,
         } => thumb_cmd(&path, &out, &ip, port, storage, cli.verbose),
+        Cmd::Star {
+            path,
+            off,
+            ip,
+            port,
+        } => star_cmd(&path, !off, &ip, port, cli.verbose),
         ble_cmd => {
             let rt = Arc::new(Runtime::new().map_err(|e| e.to_string())?);
             let adapter = ble_btleplug::adapter(&rt)?;
@@ -480,7 +533,7 @@ fn run() -> Result<(), String> {
                 }
                 Cmd::Pair { device } => pair_cmd(&rt, &adapter, device, false),
                 Cmd::Wifi { device } => pair_cmd(&rt, &adapter, device, true),
-                Cmd::Ls { .. } | Cmd::Get { .. } | Cmd::Thumb { .. } => {
+                Cmd::Ls { .. } | Cmd::Get { .. } | Cmd::Thumb { .. } | Cmd::Star { .. } => {
                     unreachable!("handled above")
                 }
             }
