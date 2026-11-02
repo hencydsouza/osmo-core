@@ -564,3 +564,32 @@ fn explicit_close_then_drop_releases_playback_only_once() {
     }
     assert_eq!(leave_frames(&log), 1);
 }
+
+#[test]
+fn status_pushes_during_a_listing_are_decoded() {
+    let mut battery = vec![0u8; 34];
+    battery[1..3].copy_from_slice(&4000u16.to_le_bytes());
+    battery[20] = 87;
+    let push = wrap(
+        Frame {
+            target: 0x0201,
+            id: 1,
+            ty: 0x40 | 0x0D << 8 | 0x02 << 16,
+            payload: battery,
+        }
+        .encode(),
+    );
+    let mut frames = manifest_frames(&fixture("oa4_6.bin"), 1);
+    frames.push(push);
+    let (cam, _log) = FakeCamera::new(Box::new(move |ctr, n| {
+        if ctr == 1 && n == 0 {
+            frames.clone()
+        } else {
+            vec![]
+        }
+    }));
+    let mut s = session(cam);
+    s.list_newest().unwrap();
+    assert_eq!(s.status().battery_percent, Some(87));
+    assert_eq!(s.status().battery_millivolts, Some(4000));
+}
