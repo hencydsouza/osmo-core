@@ -49,7 +49,11 @@ fn run() -> Result<(), String> {
                     c.model_id.and_then(model_name).unwrap_or("unknown"),
                 );
             }
-            println!("{} camera(s); {} other BLE device(s) seen, not listed", cams.len(), others);
+            println!(
+                "{} camera(s); {} other BLE device(s) seen, not listed",
+                cams.len(),
+                others
+            );
             Ok(())
         }
         Cmd::Pair { device } => pair_cmd(&rt, &adapter, device, false),
@@ -57,15 +61,27 @@ fn run() -> Result<(), String> {
     }
 }
 
-fn pair_cmd(rt: &Arc<Runtime>, adapter: &btleplug::platform::Adapter, device: Option<String>, show: bool) -> Result<(), String> {
+fn pair_cmd(
+    rt: &Arc<Runtime>,
+    adapter: &btleplug::platform::Adapter,
+    device: Option<String>,
+    show: bool,
+) -> Result<(), String> {
     let wanted = device.or_else(config::last_device);
     let (cams, _) = ble_btleplug::scan(rt, adapter, 6)?;
     let cam = ble_btleplug::pick(cams, wanted.as_deref())
         .ok_or("no matching camera found: is it on and awake? try `osmo scan`")?;
-    eprintln!("Connecting to {} ...", cam.name.as_deref().unwrap_or(&cam.id));
+    eprintln!(
+        "Connecting to {} ...",
+        cam.name.as_deref().unwrap_or(&cam.id)
+    );
     let mut link = ble_btleplug::connect(rt.clone(), &cam)?;
-    let opts = PairOptions { identifier: config::load_or_create_identity().map_err(|e| e.to_string())?, ..Default::default() };
-    let creds = pair_and_read_wifi(&mut link, &opts, &mut |s| eprintln!("{s}...")).map_err(|e| e.to_string())?;
+    let opts = PairOptions {
+        identifier: config::load_or_create_identity().map_err(|e| e.to_string())?,
+        ..Default::default()
+    };
+    let creds = pair_and_read_wifi(&mut link, &opts, &mut |s| eprintln!("{s}..."))
+        .map_err(|e| e.to_string())?;
     let _ = config::save_last_device(&cam.id);
     println!("SSID: {}", creds.ssid);
     if show {
@@ -78,13 +94,13 @@ fn pair_cmd(rt: &Arc<Runtime>, adapter: &btleplug::platform::Adapter, device: Op
     }
     Ok(())
 }
-    }
-}
 
 fn main() -> ExitCode {
     match run() {
-Ok(()) => ExitCode::SUCCESS,
-Err(e) => {
-    eprintln!("error: {e}");
-    ExitCode::FAILURE
+        Ok(()) => ExitCode::SUCCESS,
+        Err(e) => {
+            eprintln!("error: {e}");
+            ExitCode::FAILURE
+        }
+    }
 }
