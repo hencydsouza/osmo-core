@@ -207,3 +207,28 @@ fn status_is_decoded_and_invalid_fix_is_never_sent() {
     }
     assert!(!cam.sent.iter().any(|f| f.id == 0x17));
 }
+
+#[test]
+fn quiet_status_feed_is_resubscribed() {
+    let mut cam = Camera::new();
+    {
+        let mut session = connect(
+            &mut cam,
+            identity(),
+            1234,
+            Duration::from_millis(100),
+            &|| false,
+        )
+        .unwrap();
+        assert!(session.poll(Duration::from_millis(1700)).unwrap().is_none());
+    }
+    let subscriptions = cam
+        .sent
+        .iter()
+        .filter(|f| (f.set, f.id) == (0x1d, 5))
+        .count();
+    assert!(
+        subscriptions >= 2,
+        "the silent status feed must be resubscribed"
+    );
+}
