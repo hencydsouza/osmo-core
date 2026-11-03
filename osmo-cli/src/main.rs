@@ -81,10 +81,10 @@ enum Cmd {
         #[arg(long)]
         storage: Option<u8>,
     },
-    /// Favourite (star) a file on the camera, or un-star it with --off. PATH is the camera path as `osmo ls` prints it.
+    /// Favourite (star) a file on the camera. PATH is the camera path as `osmo ls` prints it. --off does not work on an Action 4 yet.
     Star {
         path: String,
-        /// Remove the star instead of adding it.
+        /// Remove the star instead of adding it. NOT WORKING on an Action 4: the camera says OK but keeps the star.
         #[arg(long)]
         off: bool,
         #[arg(long, default_value = CAMERA_IP)]
