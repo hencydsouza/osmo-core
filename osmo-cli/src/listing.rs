@@ -196,6 +196,47 @@ pub fn find_file<'a>(files: &'a [CameraFile], path: &str) -> Option<&'a CameraFi
     files.iter().find(|f| f.path == path)
 }
 
+/// Turn the paths the user typed into the exact listed files to delete, or refuse. All or nothing: one bad path
+/// refuses the whole request so a typo never leaves a partial deletion. Paths must match a listed path exactly
+/// (no globs, no directories), and the file must be safely deletable.
+pub fn plan_deletions<'a>(
+    files: &'a [CameraFile],
+    requested: &[String],
+) -> Result<Vec<&'a CameraFile>, Vec<String>> {
+    if requested.is_empty() {
+        return Err(vec!["nothing to delete: give at least one path".to_string()]);
+    }
+    let mut chosen: Vec<&CameraFile> = Vec::new();
+    let mut refusals = Vec::new();
+    for path in requested {
+        if validate_get_path(path).is_err() || path.contains(['*', '?', '[']) || path.ends_with('/')
+        {
+            refusals.push(format!(
+                "{path}: not a single file path as printed by `osmo ls`"
+            ));
+            continue;
+        }
+        match find_file(files, path) {
+            None => refusals.push(format!(
+                "{path}: not in the camera's newest listing, so it will not be deleted (check it against `osmo ls`)"
+            )),
+            Some(f) if !f.deletable() => refusals.push(format!(
+                "{path}: no verified, unshared handle, so it will not be deleted"
+            )),
+            Some(f) => {
+                if !chosen.iter().any(|c| c.path == f.path) {
+                    chosen.push(f);
+                }
+            }
+        }
+    }
+    if refusals.is_empty() {
+        Ok(chosen)
+    } else {
+        Err(refusals)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -456,5 +497,65 @@ mod tests {
             0
         );
         assert!(find_file(&files, "DCIM/DJI_001/NOPE.MP4").is_none());
+    }
+
+    fn deletable_file(path: &str, handle: u32) -> CameraFile {
+        CameraFile {
+            handle,
+            ..file(path, 0, 10)
+        }
+    }
+
+    #[test]
+    fn plan_deletions_refuses_unknown_paths_by_name_and_deletes_nothing() {
+        let files = vec![deletable_file("DCIM/DJI_001/A_0001_D.JPG", 0x40100040)];
+        let req = vec![
+            "DCIM/DJI_001/A_0001_D.JPG".to_string(),
+            "DCIM/DJI_001/TYPO_0002_D.JPG".to_string(),
+        ];
+        let err = plan_deletions(&files, &req).unwrap_err();
+        assert_eq!(err.len(), 1);
+        assert!(err[0].contains("TYPO_0002_D.JPG"), "{err:?}");
+    }
+
+    #[test]
+    fn plan_deletions_refuses_a_non_deletable_file() {
+        let mut shared = deletable_file("DCIM/DJI_001/A_0001_D.JPG", 0x40100040);
+        shared.handle_shared = true;
+        let unverified = deletable_file("DCIM/DJI_001/B_0002_D.JPG", 0);
+        let files = vec![shared, unverified];
+        let req = vec![
+            "DCIM/DJI_001/A_0001_D.JPG".to_string(),
+            "DCIM/DJI_001/B_0002_D.JPG".to_string(),
+        ];
+        let err = plan_deletions(&files, &req).unwrap_err();
+        assert_eq!(err.len(), 2);
+        assert!(err[0].contains("A_0001_D.JPG") && err[1].contains("B_0002_D.JPG"));
+    }
+
+    #[test]
+    fn plan_deletions_dedupes_repeated_paths() {
+        let files = vec![deletable_file("DCIM/DJI_001/A_0001_D.JPG", 0x40100040)];
+        let req = vec![
+            "DCIM/DJI_001/A_0001_D.JPG".to_string(),
+            "DCIM/DJI_001/A_0001_D.JPG".to_string(),
+        ];
+        assert_eq!(plan_deletions(&files, &req).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn plan_deletions_refuses_globs_directories_and_nothing_at_all() {
+        let files = vec![deletable_file("DCIM/DJI_001/A_0001_D.JPG", 0x40100040)];
+        for bad in [
+            "DCIM/DJI_001/*",
+            "DCIM/DJI_001/",
+            "DCIM/",
+            "../etc/passwd",
+            "DCIM/DJI_001/A_000?_D.JPG",
+        ] {
+            let err = plan_deletions(&files, &[bad.to_string()]).unwrap_err();
+            assert_eq!(err.len(), 1, "{bad}");
+        }
+        assert!(plan_deletions(&files, &[]).unwrap_err()[0].contains("nothing"));
     }
 }

@@ -117,3 +117,32 @@ multi-attempt download *with* keepalive (no cuts happened in either keepalive ru
 - `osmo get --sidecars` on a photo: `no sidecar`, the expected answer for a card that does not shoot JPEG+DNG; the
   HEAD for the missing `.DNG` came back as a clean 404. A real DNG/WAV sidecar download is not yet verified live.
 - Not covered live: locating a file older than the newest page (this card has 14 files, so every file is on page 1).
+
+## HW-C: favourite on and off (2026-11-03) - partly live-verified, one bug found
+
+- Star on: the camera accepted it, a fresh listing confirmed it, and `ls` showed the star. Live-verified.
+- A run before the owner had joined the camera's WiFi failed cleanly with the route warning and the "join the
+  camera's WiFi" message. Live-verified error path.
+- Star off: acknowledged (status 0) twice, in separate runs, yet the star never cleared in any later listing.
+- Cause: each `osmo` run started its write counter at 1, and the camera treats a repeated counter as a repeat
+  (acknowledge, do nothing); Osmosis's own tests note the counter "has to advance". The same bug would have made
+  every delete after the first silently do nothing. Fixed test-first: one shared write counter, persisted by the
+  CLI and seeded from the clock so it cannot collide with counters used earlier. Not yet re-verified live.
+
+## HW-C follow-up (2026-11-03): un-favourite ignored, counter theory not confirmed
+
+- Star ON works on a fresh file (0009) with a large clock-seeded counter; a fresh listing and `ls` show the star.
+- Star OFF is acknowledged (status 0) but the camera keeps the heart, confirmed on the camera's own screen.
+  It failed with counter 1 (separate process) and with the clock-seeded counter, so the counter is not the cause.
+- Osmosis restarts counters at 1 per session and only unit-tests the off payload; un-favourite was never hardware-verified.
+- Open: the correct un-favourite encoding for the Action 4. Delete not started.
+
+## HW-D: delete (2026-11-03) - delete live-verified, confirmation step fixed after
+
+- Dry run on a throwaway photo printed `would delete:` and `Nothing was deleted`; a following `ls` still listed it.
+- A typo path was refused by name (`not in the camera's newest listing`) and nothing was sent.
+- `rm --yes`: the camera answered OK (status 0) and the photo was gone from the next `osmo ls` (14 files; owner's
+  photo count back to 14). Live-verified.
+- The in-command check failed: it re-listed on the SAME session, the camera answered on a different channel and
+  returned 0 files, so `rm` reported "cannot be confirmed" although the delete worked. Fixed: the check now runs on a
+  fresh session, like `star`. Not yet re-verified live.

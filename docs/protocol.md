@@ -28,6 +28,12 @@ BLE pair -> read WiFi credentials -> (user joins the camera's WiFi) -> TCP-7001 
 - **Waking the AP:** the camera's WiFi AP sleeps when idle. `0x53/0x10 00 00 00 00` to receiver type 0x1C (not
   the camera) after pairing brings it up (about 15 s; live-verified on an Action 4 across several wake-and-join runs).
   Holding it up afterwards needs traffic: a datalink session, an HTTP transfer, or a ~10 s heartbeat.
+- **Write counters (unproven theory).** Osmosis restarts its favourite/delete counters at 1 every session and works, so the
+  "camera ignores a repeated counter" idea behind the persisted clock-seeded counter is NOT established. What is
+  established on an Action 4: favourite ON works from counter 1 and from large clock-seeded counters, on different files.
+- **Un-favourite is not working on the Action 4.** `0x02/0xBF` with `on=00` is acknowledged (status 0) but the camera
+  keeps the heart (confirmed on the camera's own screen, and by fresh listings). Osmosis never verified un-favourite on
+  hardware, only that its payload differs from "on" by one byte. The right wire form is still unknown.
 - **Pairing identity:** 32 chars, minted once and persisted. A new one per run re-prompts on the camera.
 - **Datalink sequencing:** every packet carries `[ack = my previous seq][my seq]` in our own sequence space, and
   the 34-byte window ack echoes the peer's own cursors. Wrong values here silently drop writes while reads keep
@@ -42,5 +48,5 @@ BLE pair -> read WiFi credentials -> (user joins the camera's WiFi) -> TCP-7001 
 
 ## Not implemented (by design, for now)
 
-Time sync, delete, favourite, burst/highlights, thumbnails, trimmed download, RTMP livestream, GPS sync, drones,
-paging beyond the newest 45 files per store, Xtra rebadges, auto WiFi join.
+Time sync, un-favourite on the Action 4, burst/highlights, trimmed download, RTMP livestream, GPS sync, drones,
+delete of files older than the newest page, Xtra rebadges, auto WiFi join.

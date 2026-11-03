@@ -3,8 +3,8 @@ mod ble_btleplug;
 use clap::{Parser, Subcommand};
 use osmo_cli::listing::{
     dest_filename, download_error_message, file_from_path, fill_unknown_sizes, format_listing,
-    format_status, human_size, known_size, progress_line, sidecars_to_fetch, thumb_sources,
-    truncation_warning, validate_get_path, ThumbSource,
+    format_status, human_size, known_size, plan_deletions, progress_line, sidecars_to_fetch,
+    thumb_sources, truncation_warning, validate_get_path, ThumbSource,
 };
 use osmo_cli::{config, route::route_warning};
 use osmo_core::ble::{model_name, pair_and_read_wifi, PairOptions};
@@ -67,6 +67,19 @@ enum Cmd {
         #[arg(long, value_parser = clap::value_parser!(u8).range(1..))]
         page_size: Option<u8>,
     },
+    /// Delete files from the camera. IRREVERSIBLE. Paths are exactly as `osmo ls` prints them (no globs). Without
+    /// --yes it only prints what it would delete. Only files in the newest listing can be deleted.
+    Rm {
+        #[arg(required = true)]
+        paths: Vec<String>,
+        /// Really delete. Without this nothing is sent to the camera.
+        #[arg(long)]
+        yes: bool,
+        #[arg(long, default_value = CAMERA_IP)]
+        ip: String,
+        #[arg(long, default_value_t = 9004)]
+        port: u16,
+    },
     /// Save a file's thumbnail as an image. PATH is the camera path exactly as `osmo ls` prints it.
     Thumb {
         path: String,
@@ -80,6 +93,17 @@ enum Cmd {
         /// Skip the listing and use this store (0 = SD card, 1 = internal). This opens no datalink.
         #[arg(long)]
         storage: Option<u8>,
+    },
+    /// Favourite (star) a file on the camera. PATH is the camera path as `osmo ls` prints it. --off does not work on an Action 4 yet.
+    Star {
+        path: String,
+        /// Remove the star instead of adding it. NOT WORKING on an Action 4: the camera says OK but keeps the star.
+        #[arg(long)]
+        off: bool,
+        #[arg(long, default_value = CAMERA_IP)]
+        ip: String,
+        #[arg(long, default_value_t = 9004)]
+        port: u16,
     },
     /// Download one file, resuming a partial one. PATH is the camera path exactly as `osmo ls` prints it.
     Get {
@@ -212,6 +236,108 @@ fn ls_cmd(
     }
     s.close();
     println!("{}", format_listing(&files?));
+    Ok(())
+}
+
+fn star_cmd(path: &str, on: bool, ip: &str, port: u16, verbose: bool) -> Result<(), String> {
+    let path = validate_get_path(path)?;
+    {
+        let mut sess = open_session(ip, port, verbose)?;
+        eprintln!("Looking up {path} ...");
+        let found = sess.find_file(path).map_err(session_err)?;
+        warn_if_unconfirmed(&sess);
+        let file = found.ok_or(
+            "not found anywhere in the camera's library: check the path against `osmo ls --all`",
+        )?;
+        eprintln!("Sending favourite {} ...", if on { "on" } else { "off" });
+        sess.set_write_counter_start(config::next_write_counter());
+        let result = sess.set_favourite(&file, on);
+        // Advance the persisted counter whatever happened: the camera may have seen this one.
+        let _ = config::save_write_counter(sess.next_write_counter());
+        result.map_err(|e| e.to_string())?;
+        println!(
+            "The camera accepted it: {path} {}",
+            if on {
+                "is now starred"
+            } else {
+                "is no longer starred"
+            }
+        );
+    }
+    // Confirm on a fresh session: a second handshake on the same transport is not attempted.
+    let mut check = open_session(ip, port, verbose)?;
+    match check.find_file(path).map_err(session_err)? {
+        Some(f) if f.starred == on => println!(
+            "A fresh listing confirms it ({}).",
+            if on { "starred" } else { "not starred" }
+        ),
+        Some(_) => eprintln!(
+            "warning: a fresh listing does not show the change yet; run `osmo ls` to check"
+        ),
+        None => eprintln!("warning: could not find the file again to confirm"),
+    }
+    Ok(())
+}
+
+fn rm_cmd(paths: &[String], yes: bool, ip: &str, port: u16, verbose: bool) -> Result<(), String> {
+    if paths.len() > 20 {
+        return Err("at most 20 files can be deleted per command".to_string());
+    }
+    let mut sess = open_session(ip, port, verbose)?;
+    eprintln!("Listing {ip}:{port} ...");
+    let files = sess.list_newest().map_err(session_err)?;
+    warn_if_unconfirmed(&sess);
+    let plan = match plan_deletions(&files, paths) {
+        Ok(p) => p,
+        Err(refusals) => {
+            for r in &refusals {
+                eprintln!("refused: {r}");
+            }
+            return Err("nothing was deleted".to_string());
+        }
+    };
+    if !yes {
+        println!("would delete:");
+        for f in &plan {
+            println!("  {:>10}  {}", human_size(f.size_bytes), f.path);
+        }
+        println!(
+            "Nothing was deleted. Add --yes to delete {} file(s); this cannot be undone.",
+            plan.len()
+        );
+        return Ok(());
+    }
+    sess.set_write_counter_start(config::next_write_counter());
+    let result = sess.delete_files(&plan);
+    let _ = config::save_write_counter(sess.next_write_counter());
+    result.map_err(|e| e.to_string())?;
+    eprintln!("The camera answered OK; checking the files are gone ...");
+    // Check on a fresh session: a second handshake on the same session makes the camera answer empty.
+    drop(sess);
+    let after = open_session(ip, port, verbose)
+        .map_err(|e| format!("{e}\nthe camera answered OK but the check could not start: run `osmo ls` to see what is left"))?
+        .list_newest()
+        .map_err(|e| {
+            format!(
+                "the camera answered OK but the check failed ({}): run `osmo ls` to see what is left",
+                session_err(e)
+            )
+        })?;
+    if after.is_empty() {
+        return Err("the camera answered OK but the check returned no files at all, so it cannot be confirmed: run `osmo ls`".to_string());
+    }
+    let left: Vec<&str> = plan
+        .iter()
+        .filter(|f| after.iter().any(|a| a.path == f.path))
+        .map(|f| f.path.as_str())
+        .collect();
+    if !left.is_empty() {
+        return Err(format!(
+            "the camera answered OK but these files are still listed: {}",
+            left.join(", ")
+        ));
+    }
+    println!("deleted {} file(s)", plan.len());
     Ok(())
 }
 
@@ -456,6 +582,18 @@ fn run() -> Result<(), String> {
             port,
             storage,
         } => thumb_cmd(&path, &out, &ip, port, storage, cli.verbose),
+        Cmd::Rm {
+            paths,
+            yes,
+            ip,
+            port,
+        } => rm_cmd(&paths, yes, &ip, port, cli.verbose),
+        Cmd::Star {
+            path,
+            off,
+            ip,
+            port,
+        } => star_cmd(&path, !off, &ip, port, cli.verbose),
         ble_cmd => {
             let rt = Arc::new(Runtime::new().map_err(|e| e.to_string())?);
             let adapter = ble_btleplug::adapter(&rt)?;
@@ -480,7 +618,11 @@ fn run() -> Result<(), String> {
                 }
                 Cmd::Pair { device } => pair_cmd(&rt, &adapter, device, false),
                 Cmd::Wifi { device } => pair_cmd(&rt, &adapter, device, true),
-                Cmd::Ls { .. } | Cmd::Get { .. } | Cmd::Thumb { .. } => {
+                Cmd::Ls { .. }
+                | Cmd::Get { .. }
+                | Cmd::Thumb { .. }
+                | Cmd::Star { .. }
+                | Cmd::Rm { .. } => {
                     unreachable!("handled above")
                 }
             }
