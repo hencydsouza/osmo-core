@@ -17,6 +17,31 @@ pub fn device_matches(id: &str, name: Option<&str>, wanted: &str) -> bool {
         || name.is_some_and(|n| n.to_lowercase().contains(&wanted.to_lowercase()))
 }
 
+/// Select a unique camera; exact identifiers win over partial name matches.
+pub fn select_camera_index(
+    cameras: &[(&str, Option<&str>)],
+    wanted: Option<&str>,
+) -> Result<Option<usize>, &'static str> {
+    if let Some(wanted) = wanted {
+        if let Some((i, _)) = cameras
+            .iter()
+            .enumerate()
+            .find(|(_, (id, _))| id.eq_ignore_ascii_case(wanted))
+        {
+            return Ok(Some(i));
+        }
+    }
+    let mut matches = cameras
+        .iter()
+        .enumerate()
+        .filter(|(_, (id, name))| wanted.is_none_or(|w| device_matches(id, *name, w)));
+    let first = matches.next().map(|(i, _)| i);
+    if matches.next().is_some() {
+        return Err("multiple cameras match; use --device with an exact id from `osmo scan`");
+    }
+    Ok(first)
+}
+
 pub fn bluetooth_hint() -> String {
     "Bluetooth unavailable: check Bluetooth is on and this terminal has Bluetooth permission \
      (System Settings > Privacy & Security > Bluetooth)."
@@ -66,5 +91,18 @@ mod tests {
         ));
         assert!(!device_matches("ABC-123", Some("OsmoNano-C2D8"), "action4"));
         assert!(!device_matches("ABC-123", None, "action4"));
+    }
+
+    #[test]
+    fn camera_selection_refuses_ambiguous_names_and_prefers_exact_ids() {
+        let cameras = [("abc", Some("Action One")), ("def", Some("Action Two"))];
+        assert!(select_camera_index(&cameras, None).is_err());
+        assert!(select_camera_index(&cameras, Some("action")).is_err());
+        assert_eq!(select_camera_index(&cameras, Some("ABC")).unwrap(), Some(0));
+        assert_eq!(select_camera_index(&cameras, Some("two")).unwrap(), Some(1));
+        assert_eq!(
+            select_camera_index(&cameras, Some("missing")).unwrap(),
+            None
+        );
     }
 }

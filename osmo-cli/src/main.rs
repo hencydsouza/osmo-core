@@ -8,7 +8,7 @@ use osmo_cli::listing::{
     validate_get_path, zone_from_link, ThumbSource,
 };
 use osmo_cli::listing::{filter_files, format_marks, Kind};
-use osmo_cli::{config, route::route_warning};
+use osmo_cli::{cameras, config, route::route_warning};
 use osmo_core::ble::{
     model_name, pair_and_read_wifi, start_livestream_cancellable, PairOptions, StreamConfig,
     WifiCreds,
@@ -76,6 +76,15 @@ enum StreamModel {
 
 #[derive(Subcommand)]
 enum Cmd {
+    /// List remembered cameras; optionally scan for nearby cameras.
+    Cameras {
+        /// Scan over Bluetooth and include newly discovered cameras.
+        #[arg(long)]
+        scan: bool,
+        /// Scan duration in seconds.
+        #[arg(long, default_value_t = 8)]
+        seconds: u64,
+    },
     /// Sync GPS to the camera from newline-delimited JSON on stdin (R-SDK).
     Gps {
         /// Camera identifier or name (defaults to the last paired camera).
@@ -772,6 +781,46 @@ fn get_cmd(paths: &[String], out: &PathBuf, opts: GetOpts) -> Result<(), String>
     Ok(())
 }
 
+fn remember_camera(camera: &ble_btleplug::Found) {
+    let saved = cameras::SavedCamera {
+        id: camera.id.clone(),
+        name: camera.name.clone(),
+        model_id: camera.model_id,
+    };
+    if let Err(e) = cameras::remember(&saved) {
+        eprintln!("warning: could not remember camera: {e}");
+    }
+    if let Err(e) = config::save_last_device(&camera.id) {
+        eprintln!("warning: could not save last camera: {e}");
+    }
+}
+
+fn cameras_cmd(scan: bool, seconds: u64) -> Result<(), String> {
+    let saved = cameras::load().map_err(|e| format!("could not load saved cameras: {e}"))?;
+    let visible = if scan {
+        let rt = Runtime::new().map_err(|e| e.to_string())?;
+        let adapter = ble_btleplug::adapter(&rt)?;
+        let (found, _) = ble_btleplug::scan(&rt, &adapter, seconds)?;
+        Some(
+            found
+                .into_iter()
+                .map(|c| cameras::VisibleCamera {
+                    id: c.id,
+                    name: c.name,
+                    model_id: c.model_id,
+                })
+                .collect::<Vec<_>>(),
+        )
+    } else {
+        None
+    };
+    println!(
+        "{}",
+        cameras::format_listing(&saved, visible.as_deref(), config::last_device().as_deref())
+    );
+    Ok(())
+}
+
 fn camera_wifi_creds(
     rt: &Arc<Runtime>,
     adapter: &btleplug::platform::Adapter,
@@ -779,7 +828,7 @@ fn camera_wifi_creds(
 ) -> Result<WifiCreds, String> {
     let wanted = device.or_else(config::last_device);
     let (cams, _) = ble_btleplug::scan(rt, adapter, 6)?;
-    let cam = ble_btleplug::pick(cams, wanted.as_deref())
+    let cam = ble_btleplug::pick(cams, wanted.as_deref())?
         .ok_or("no matching camera found: is it on and awake? try `osmo scan`")?;
     eprintln!(
         "Connecting to {} ...",
@@ -792,7 +841,7 @@ fn camera_wifi_creds(
     };
     let creds = pair_and_read_wifi(&mut link, &opts, &mut |s| eprintln!("{s}..."))
         .map_err(|e| e.to_string())?;
-    let _ = config::save_last_device(&cam.id);
+    remember_camera(&cam);
     Ok(creds)
 }
 
@@ -899,7 +948,7 @@ fn stream_cmd(options: StreamOpts) -> Result<(), String> {
     if interrupted.load(Ordering::SeqCst) {
         return Err("interrupted before streaming".into());
     }
-    let camera = ble_btleplug::pick(cams, wanted.as_deref())
+    let camera = ble_btleplug::pick(cams, wanted.as_deref())?
         .ok_or("no matching camera found: is it on and awake? try `osmo scan`")?;
     eprintln!(
         "Connecting to {} ...",
@@ -918,7 +967,7 @@ fn stream_cmd(options: StreamOpts) -> Result<(), String> {
         &|| interrupted.load(Ordering::SeqCst),
     )
     .map_err(|e| e.to_string())?;
-    let _ = config::save_last_device(&camera.id);
+    remember_camera(&camera);
     eprintln!("Start acknowledged; check the RTMP server for video. Press Ctrl-C to stop.");
     let mut last_battery = None;
     while !interrupted.load(Ordering::SeqCst) {
@@ -970,7 +1019,7 @@ fn gps_cmd(device: Option<String>) -> Result<(), String> {
     if interrupted.load(Ordering::SeqCst) {
         return Err("interrupted before GPS connection".into());
     }
-    let camera = ble_btleplug::pick(cams, wanted.as_deref())
+    let camera = ble_btleplug::pick(cams, wanted.as_deref())?
         .ok_or("no matching camera found: is it on and awake? try `osmo scan`")?;
     eprintln!(
         "Connecting to {} ...",
@@ -990,7 +1039,7 @@ fn gps_cmd(device: Option<String>) -> Result<(), String> {
         &|| interrupted.load(Ordering::SeqCst),
     )
     .map_err(|e| e.to_string())?;
-    let _ = config::save_last_device(&camera.id);
+    remember_camera(&camera);
     eprintln!("GPS connected. Reading newline-delimited GPS fixes from stdin; Ctrl-C disconnects.");
     let (tx, rx) = std::sync::mpsc::sync_channel(16);
     std::thread::spawn(move || {
@@ -1088,6 +1137,7 @@ fn gps_cmd(device: Option<String>) -> Result<(), String> {
 fn run() -> Result<(), String> {
     let cli = Cli::parse();
     match cli.cmd {
+        Cmd::Cameras { scan, seconds } => cameras_cmd(scan, seconds),
         Cmd::WithWifi { return_to, args } => {
             if wraps_camera_control(&args) {
                 return Err(
@@ -1219,7 +1269,8 @@ fn run() -> Result<(), String> {
                 | Cmd::Burst { .. }
                 | Cmd::WithWifi { .. }
                 | Cmd::Stream { .. }
-                | Cmd::Gps { .. } => {
+                | Cmd::Gps { .. }
+                | Cmd::Cameras { .. } => {
                     unreachable!("handled above")
                 }
             }
