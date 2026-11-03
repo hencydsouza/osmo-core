@@ -7,7 +7,7 @@ use super::paging::{
 };
 use super::stream::{chunk_tally, count_media_paths, manifest_bytes, streams_ended};
 use super::transport::{Datagram, Transport, UdpPeer};
-use super::writes::{favourite_payload, WriteError};
+use super::writes::{delete_payload, favourite_payload, WriteError};
 use crate::duml::commands::{set_pairing_pin, APP_DEVICE_INFO, DEFAULT_IDENTIFIER};
 use crate::duml::{find_reply, scan_frames};
 use crate::media::CameraFile;
@@ -143,6 +143,8 @@ pub struct Timing {
     pub write_window: Duration,
     /// How long to wait for a write's reply before reporting no answer.
     pub write_reply_wait: Duration,
+    /// How long to wait for a delete's reply (the camera takes about a second; a large clip can take longer).
+    pub delete_reply_wait: Duration,
 }
 
 impl Default for Timing {
@@ -166,6 +168,7 @@ impl Default for Timing {
             tick: ms(200),
             write_window: Duration::from_secs(40),
             write_reply_wait: Duration::from_secs(2),
+            delete_reply_wait: Duration::from_secs(10),
         }
     }
 }
@@ -192,6 +195,7 @@ impl Timing {
             tick: ms(1),
             write_window: Duration::from_secs(5),
             write_reply_wait: ms(30),
+            delete_reply_wait: ms(30),
         }
     }
 }
@@ -667,8 +671,8 @@ impl<D: Datagram> CameraSession<D> {
 
     /// Wait for the camera's reply to a write on `set/cmd`: status 0 is success, anything else a refusal, and
     /// silence is `NoReply` (never success).
-    fn write_reply(&mut self, set: u8, cmd: u8) -> Result<(), WriteError> {
-        let end = Instant::now() + self.timing.write_reply_wait;
+    fn write_reply(&mut self, set: u8, cmd: u8, wait: Duration) -> Result<(), WriteError> {
+        let end = Instant::now() + wait;
         while Instant::now() < end {
             let dg = self.recv(self.timing.poll);
             if let Some(r) = find_reply(&dg, set, cmd) {
@@ -708,8 +712,36 @@ impl<D: Datagram> CameraSession<D> {
             "write: favourite 0x{:08x} on={on}",
             file.cmd_handle
         ));
-        let result = self.write_reply(0x02, 0xBF);
+        let result = self.write_reply(0x02, 0xBF, self.timing.write_reply_wait);
         self.log(format!("write: favourite reply {result:?}"));
+        result
+    }
+
+    /// Delete files (`0x00/0x28`). IRREVERSIBLE. Every file is checked first (a verified handle nobody else
+    /// holds), and if any is unsafe nothing at all is sent. The camera's "OK" is not proof: the caller must
+    /// re-list to confirm, as a favourite "OK" has been seen to do nothing.
+    pub fn delete_files(&mut self, files: &[&CameraFile]) -> Result<(), WriteError> {
+        const MAX: usize = 20;
+        if files.len() > MAX {
+            return Err(WriteError::TooMany { max: MAX });
+        }
+        if let Some(f) = files.iter().find(|f| !f.deletable()) {
+            return Err(WriteError::NotDeletable(f.path.clone()));
+        }
+        if files.is_empty() {
+            return Ok(());
+        }
+        self.write_guard()?;
+        let handles: Vec<u32> = files.iter().map(|f| f.handle).collect();
+        let counter = self.write_counter;
+        self.write_counter = self.write_counter.wrapping_add(1);
+        self.send(0x00, 0x28, &delete_payload(&handles, counter), 0x01, 0);
+        self.log(format!(
+            "write: delete {} file(s) {handles:08x?}",
+            files.len()
+        ));
+        let result = self.write_reply(0x00, 0x28, self.timing.delete_reply_wait);
+        self.log(format!("write: delete reply {result:?}"));
         result
     }
 

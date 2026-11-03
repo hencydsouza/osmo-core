@@ -1,8 +1,8 @@
 //! Datalink session against a scripted fake camera that replays the captured manifests.
 //! Fixture-tested only: this proves our side of the protocol, not that a real camera accepts it.
 use osmo_core::datalink::{
-    decode_manifest, favourite_payload, tcp_poke_bytes, tcp_poke_to, CameraSession, Datagram,
-    SessionError, Timing, WriteError,
+    decode_manifest, delete_payload, favourite_payload, tcp_poke_bytes, tcp_poke_to, CameraSession,
+    Datagram, SessionError, Timing, WriteError,
 };
 use osmo_core::duml::commands::DEFAULT_IDENTIFIER;
 use osmo_core::duml::{pack_string, Frame};
@@ -919,4 +919,126 @@ fn the_write_counter_can_continue_a_sequence_from_an_earlier_process() {
         43,
         "the caller persists this for the next run"
     );
+}
+
+/// A listed Action 4-like session whose `0x00/0x28` delete is answered with `reply` (None: silence).
+fn deletable_session(
+    reply: Option<Vec<u8>>,
+    timing: Timing,
+) -> (
+    CameraSession<FakeCamera>,
+    Log,
+    Vec<osmo_core::media::CameraFile>,
+) {
+    let frames = manifest_frames(&fixture("oa4_45.bin"), 1);
+    let (mut cam, log) = FakeCamera::new(Box::new(move |ctr, n| {
+        if ctr == 1 && n == 0 {
+            frames.clone()
+        } else {
+            vec![]
+        }
+    }));
+    cam.playback = Playback::RefusesUntilControl;
+    if let Some(p) = reply {
+        cam.write_replies.push(((0x00, 0x28), p));
+    }
+    let mut s = session_with(cam, timing);
+    let files = s.list_newest().unwrap();
+    (s, log, files)
+}
+
+fn delete_frames(log: &Log) -> Vec<Vec<u8>> {
+    duml(log)
+        .into_iter()
+        .filter(|(a, b, _)| (*a, *b) == (0x00, 0x28))
+        .map(|(_, _, p)| p)
+        .collect()
+}
+
+#[test]
+fn delete_sends_the_documented_payload_and_accepts_0000() {
+    let (mut s, log, files) = deletable_session(Some(vec![0x00, 0x00]), Timing::fast());
+    let two: Vec<&osmo_core::media::CameraFile> =
+        files.iter().filter(|f| f.deletable()).take(2).collect();
+    assert_eq!(two.len(), 2, "the fixture has deletable files");
+    s.delete_files(&two).unwrap();
+    assert_eq!(
+        delete_frames(&log),
+        vec![delete_payload(&[two[0].handle, two[1].handle], 1)]
+    );
+}
+
+#[test]
+fn delete_refuses_a_shared_handle_before_sending_anything() {
+    let (mut s, log, files) = deletable_session(Some(vec![0x00, 0x00]), Timing::fast());
+    let good = files.iter().find(|f| f.deletable()).unwrap().clone();
+    let shared = osmo_core::media::CameraFile {
+        handle_shared: true,
+        ..good.clone()
+    };
+    let r = s.delete_files(&[&good, &shared]);
+    assert!(
+        matches!(&r, Err(WriteError::NotDeletable(p)) if *p == shared.path),
+        "{r:?}"
+    );
+    assert!(
+        delete_frames(&log).is_empty(),
+        "nothing is sent when any file is unsafe, not even the safe one"
+    );
+}
+
+#[test]
+fn delete_refuses_a_file_with_no_verified_handle() {
+    let (mut s, log, files) = deletable_session(Some(vec![0x00, 0x00]), Timing::fast());
+    let good = files.iter().find(|f| f.deletable()).unwrap().clone();
+    let unverified = osmo_core::media::CameraFile { handle: 0, ..good };
+    assert!(matches!(
+        s.delete_files(&[&unverified]),
+        Err(WriteError::NotDeletable(_))
+    ));
+    assert!(delete_frames(&log).is_empty());
+}
+
+#[test]
+fn delete_refuses_more_than_20_files() {
+    let (mut s, log, files) = deletable_session(Some(vec![0x00, 0x00]), Timing::fast());
+    let good = files.iter().find(|f| f.deletable()).unwrap();
+    let many: Vec<&osmo_core::media::CameraFile> = std::iter::repeat_n(good, 21).collect();
+    assert!(matches!(
+        s.delete_files(&many),
+        Err(WriteError::TooMany { max: 20 })
+    ));
+    assert!(delete_frames(&log).is_empty());
+}
+
+#[test]
+fn delete_no_reply_is_not_success() {
+    let (mut s, _log, files) = deletable_session(None, Timing::fast());
+    let good = files.iter().find(|f| f.deletable()).unwrap();
+    assert!(matches!(s.delete_files(&[good]), Err(WriteError::NoReply)));
+}
+
+#[test]
+fn delete_status_00d6_is_rejected() {
+    let (mut s, _log, files) = deletable_session(Some(vec![0xD6, 0x00]), Timing::fast());
+    let good = files.iter().find(|f| f.deletable()).unwrap();
+    assert!(matches!(
+        s.delete_files(&[good]),
+        Err(WriteError::Rejected(0xD6))
+    ));
+}
+
+#[test]
+fn delete_on_an_old_session_is_refused_without_sending() {
+    let old = Timing {
+        write_window: Duration::from_millis(1),
+        ..Timing::fast()
+    };
+    let (mut s, log, files) = deletable_session(Some(vec![0x00, 0x00]), old);
+    let good = files.iter().find(|f| f.deletable()).unwrap();
+    assert!(matches!(
+        s.delete_files(&[good]),
+        Err(WriteError::SessionTooOld { .. })
+    ));
+    assert!(delete_frames(&log).is_empty());
 }

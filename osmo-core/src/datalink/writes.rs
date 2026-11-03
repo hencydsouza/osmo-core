@@ -33,6 +33,20 @@ pub fn favourite_payload(handle: u32, counter: u32, on: bool) -> Vec<u8> {
     p
 }
 
+/// `0x00/0x28` delete: `[count:u8] [handle:u32-LE x count] [counter:u32-LE] 00 [count:u32-LE] 01 01 00 00`.
+/// Irreversible: callers must only pass verified, unshared handles.
+pub fn delete_payload(handles: &[u32], counter: u32) -> Vec<u8> {
+    let mut p = vec![handles.len() as u8];
+    for h in handles {
+        p.extend(h.to_le_bytes());
+    }
+    p.extend(counter.to_le_bytes());
+    p.push(0x00);
+    p.extend((handles.len() as u32).to_le_bytes());
+    p.extend([0x01, 0x01, 0x00, 0x00]);
+    p
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -83,6 +97,33 @@ mod tests {
         assert!(
             no_reply.contains("may or may not") && no_reply.contains("re-list"),
             "{no_reply}"
+        );
+    }
+
+    #[test]
+    fn delete_payload_matches_the_documented_frame() {
+        let payload = delete_payload(&[0x4010_4480], 1);
+        assert_eq!(payload, hex("018044104001000000000100000001010000"));
+        let frame = Frame {
+            target: 0x0102,
+            id: 0xA000,
+            ty: 0x40 | 0x28 << 16,
+            payload,
+        }
+        .encode();
+        assert_eq!(
+            frame,
+            hex("551f044e020100a0400028018044104001000000000100000001010000a0d1")
+        );
+    }
+
+    #[test]
+    fn delete_payload_for_two_files_lists_both_handles_and_the_count_twice() {
+        assert_eq!(
+            delete_payload(&[0x4010_4480, 0x4010_4440], 7),
+            hex("028044104040441040070000000002000000 01010000"
+                .replace(' ', "")
+                .as_str())
         );
     }
 }
