@@ -31,6 +31,7 @@ osmo ls                       # list the newest media (needs the camera's WiFi)
 osmo get DCIM/100MEDIA/DJI_20260101_0001_D.MP4 -o ~/Movies/osmo
 osmo get <path> <path> ...      # several files in one go: completed ones are skipped, a failure doesn't stop the rest
 osmo ls --all                 # every file, paged (--page-size N to force small pages)
+osmo ls --photos|--videos      # only photos or only videos; --starred for favourites only (combine with --all)
 osmo thumb <path> -o t.jpg    # the camera's thumbnail
 osmo star <path>              # favourite a file (--off does NOT work on an Action 4)
 osmo rm <path>                # dry run: shows what would be deleted
