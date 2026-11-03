@@ -5,3 +5,5 @@ osmo-core ports protocol knowledge and test fixtures from other projects:
   manifest fixtures under osmo-core/tests/fixtures/.
 - dimadesu/dji-remote (MIT) - DUML framing, CRCs (via Osmosis).
 - xaionaro-go/djictl (CC0-1.0) - livestream command layouts via Osmosis.
+- DJI Osmo-GPS-Controller-Demo - R-SDK GPS protocol reference, via Osmosis:
+  https://github.com/dji-sdk/Osmo-GPS-Controller-Demo

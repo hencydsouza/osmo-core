@@ -36,6 +36,7 @@ osmo thumb <path> -o t.jpg    # the camera's thumbnail
 osmo marks <video-path>        # highlight marks (moments tagged while recording), as m:ss.mmm
 osmo burst <group-lead-path>   # list burst/interval frames; not yet verified on an Action 4
 osmo stream                   # send RTMP from the camera; configured in .env, Ctrl-C requests stop
+osmo gps                      # read timestamped GPS fixes as JSON lines from stdin
 osmo star <path>              # favourite a file (--off does NOT work on an Action 4)
 osmo rm <path>                # dry run: shows what would be deleted
 osmo rm <path> --yes          # really delete (cannot be undone)
@@ -102,6 +103,24 @@ Run this command directly, rather than through `with-wifi`. Press Ctrl-C to send
 check the camera or server to confirm it stopped. Streaming takes the camera off its own hotspot, so media browsing
 may require waking the hotspot again. Osmosis has tested the protocol on an Action 4; this Rust implementation has
 only been tested with simulated BLE replies. The visual effect of stabilization is unverified.
+
+### GPS sync
+
+`osmo gps` uses the camera's R-SDK Bluetooth connection and reads one JSON object per line from a location
+producer on stdin. It does not obtain location from macOS or Android itself. The producer must supply all fields:
+
+```json
+{"observed_unix_ms":1784385000000,"latitude":41.4,"longitude":2.16,"altitude_m":42.0,"speed_mps":0.125,"bearing_deg":0.0,"horizontal_accuracy_m":1.0,"vertical_accuracy_m":1.0,"speed_accuracy_mps":0.1,"satellites":11}
+```
+
+Coordinates are degrees, bearing is clockwise from north, accuracy values are nonnegative, and the observation
+timestamp is Unix milliseconds. The timestamp above is an example; live input must use the actual fix time.
+The CLI normally sends the newest valid fix once per second and flushes a new final fix on EOF. It stops using
+fixes after 30 seconds and stamps each camera sample with the computer's current local time. It does not print
+coordinates. On EOF or Ctrl-C it disconnects.
+
+Run `osmo gps` directly, not inside `with-wifi`; approve the R-SDK connection on the camera if prompted. The Rust
+GPS implementation is tested against reference frames and a simulated camera, but has not been tested on hardware.
 
 ## Develop
 

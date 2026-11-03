@@ -19,6 +19,7 @@ use osmo_core::http::{HttpClient, Outcome};
 use osmo_core::media::url_path;
 use osmo_core::media::CameraFile;
 use std::ffi::OsString;
+use std::io::{BufRead, Read};
 use std::net::{IpAddr, UdpSocket};
 use std::path::PathBuf;
 use std::process::ExitCode;
@@ -75,6 +76,12 @@ enum StreamModel {
 
 #[derive(Subcommand)]
 enum Cmd {
+    /// Sync GPS to the camera from newline-delimited JSON on stdin (R-SDK).
+    Gps {
+        /// Camera identifier or name (defaults to the last paired camera).
+        #[arg(long)]
+        device: Option<String>,
+    },
     /// Start an RTMP livestream over Bluetooth. Set OSMO_RTMP_URL in .env; Ctrl-C sends stop.
     Stream {
         /// Camera identifier or name (defaults to the last paired camera).
@@ -814,17 +821,17 @@ fn pair_cmd(
     Ok(())
 }
 
-fn wraps_stream(args: &[OsString]) -> bool {
+fn wraps_camera_control(args: &[OsString]) -> bool {
     let arguments = std::iter::once(OsString::from("osmo")).chain(args.iter().cloned());
     match Cli::try_parse_from(arguments) {
         Ok(Cli {
-            cmd: Cmd::Stream { .. },
+            cmd: Cmd::Stream { .. } | Cmd::Gps { .. },
             ..
         }) => true,
         Ok(Cli {
             cmd: Cmd::WithWifi { args, .. },
             ..
-        }) => wraps_stream(&args),
+        }) => wraps_camera_control(&args),
         _ => false,
     }
 }
@@ -930,12 +937,163 @@ fn stream_cmd(options: StreamOpts) -> Result<(), String> {
     Ok(())
 }
 
+enum GpsFeed {
+    Line(String),
+    Closed,
+    Invalid,
+}
+
+fn gps_local_time() -> Result<(u64, u32, u32), String> {
+    use chrono::{Datelike, Timelike};
+    let now = chrono::Local::now();
+    let year = u32::try_from(now.year()).map_err(|_| "local clock is invalid")?;
+    if !(1..=9999).contains(&year) {
+        return Err("local clock is invalid".into());
+    }
+    let date = year * 10_000 + now.month() * 100 + now.day();
+    let time = now.hour() * 10_000 + now.minute() * 100 + now.second();
+    let millis = u64::try_from(now.timestamp_millis()).map_err(|_| "local clock is invalid")?;
+    Ok((millis, date, time))
+}
+
+fn gps_cmd(device: Option<String>) -> Result<(), String> {
+    let interrupted = Arc::new(AtomicBool::new(false));
+    let flag = interrupted.clone();
+    ctrlc::try_set_handler(move || flag.store(true, Ordering::SeqCst))
+        .map_err(|e| format!("could not install stop handler: {e}"))?;
+    let identity =
+        config::load_or_create_rsdk_identity().map_err(|e| format!("R-SDK identity: {e}"))?;
+    let rt = Arc::new(Runtime::new().map_err(|e| e.to_string())?);
+    let adapter = ble_btleplug::adapter(&rt)?;
+    let wanted = device.or_else(config::last_device);
+    let (cams, _) = ble_btleplug::scan(&rt, &adapter, 6)?;
+    if interrupted.load(Ordering::SeqCst) {
+        return Err("interrupted before GPS connection".into());
+    }
+    let camera = ble_btleplug::pick(cams, wanted.as_deref())
+        .ok_or("no matching camera found: is it on and awake? try `osmo scan`")?;
+    eprintln!(
+        "Connecting to {} ...",
+        camera.name.as_deref().unwrap_or(&camera.id)
+    );
+    let mut link = ble_btleplug::connect_rsdk(rt, &camera)?;
+    let random = osmo_core::duml::commands::new_install_identity();
+    let challenge = u16::from_str_radix(&random[..4], 16)
+        .map_err(|_| "could not create R-SDK challenge")?
+        % 10_000;
+    eprintln!("Waiting for R-SDK approval; approve on the camera if prompted ...");
+    let mut session = osmo_core::rsdk::connect(
+        &mut link,
+        identity,
+        challenge,
+        Duration::from_secs(40),
+        &|| interrupted.load(Ordering::SeqCst),
+    )
+    .map_err(|e| e.to_string())?;
+    let _ = config::save_last_device(&camera.id);
+    eprintln!("GPS connected. Reading newline-delimited GPS fixes from stdin; Ctrl-C disconnects.");
+    let (tx, rx) = std::sync::mpsc::sync_channel(16);
+    std::thread::spawn(move || {
+        const MAX_LINE: u64 = 8192;
+        let stdin = std::io::stdin();
+        let mut reader = stdin.lock();
+        loop {
+            let mut bytes = Vec::new();
+            let result = (&mut reader)
+                .take(MAX_LINE + 1)
+                .read_until(b'\n', &mut bytes);
+            match result {
+                Ok(0) => {
+                    let _ = tx.send(GpsFeed::Closed);
+                    break;
+                }
+                Ok(n) if n as u64 <= MAX_LINE => match String::from_utf8(bytes) {
+                    Ok(line) => {
+                        if tx.send(GpsFeed::Line(line)).is_err() {
+                            break;
+                        }
+                    }
+                    Err(_) => {
+                        let _ = tx.send(GpsFeed::Invalid);
+                        break;
+                    }
+                },
+                _ => {
+                    let _ = tx.send(GpsFeed::Invalid);
+                    break;
+                }
+            }
+        }
+    });
+    let mut feed = osmo_cli::gps::GpsFeedState::default();
+    let mut closed = false;
+    let mut sent = 0u64;
+    let mut next_push = Instant::now();
+    let mut stale_reported = false;
+    let mut last_battery = None;
+    while !interrupted.load(Ordering::SeqCst) {
+        for _ in 0..16 {
+            match rx.try_recv() {
+                Ok(GpsFeed::Line(line)) => {
+                    let input = osmo_cli::gps::GpsInput::parse(&line)?;
+                    let (now, date, time) = gps_local_time()?;
+                    if feed.accept(input, now, date, time)? {
+                        stale_reported = false;
+                    }
+                }
+                Ok(GpsFeed::Closed) | Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                    closed = true;
+                    break;
+                }
+                Ok(GpsFeed::Invalid) => {
+                    return Err(
+                        "GPS input must be UTF-8 JSON lines no longer than 8192 bytes".into(),
+                    )
+                }
+                Err(std::sync::mpsc::TryRecvError::Empty) => break,
+            }
+        }
+        let (now, date, time) = gps_local_time()?;
+        if let Some(fix) = feed.next_fix(now, date, time, Instant::now() >= next_push, closed)? {
+            session.send_fix(&fix).map_err(|e| e.to_string())?;
+            sent += 1;
+            next_push = Instant::now() + Duration::from_secs(1);
+        } else if feed.is_stale(now) && !stale_reported {
+            eprintln!("GPS fix is stale; waiting for a fresh fix.");
+            stale_reported = true;
+        }
+        if closed {
+            if sent == 0 {
+                return Err("GPS input ended without a fresh fix".into());
+            }
+            eprintln!("GPS input ended; disconnecting.");
+            return Ok(());
+        }
+        if let Some(status) = session
+            .poll(Duration::from_millis(100))
+            .map_err(|e| e.to_string())?
+        {
+            if status.battery_percent != last_battery {
+                if let Some(battery) = status.battery_percent {
+                    eprintln!("Camera battery {battery}%");
+                }
+                last_battery = status.battery_percent;
+            }
+        }
+    }
+    eprintln!("GPS sync stopped.");
+    Ok(())
+}
+
 fn run() -> Result<(), String> {
     let cli = Cli::parse();
     match cli.cmd {
         Cmd::WithWifi { return_to, args } => {
-            if wraps_stream(&args) {
-                return Err("run `osmo stream` directly; the camera joins your network instead of its own hotspot".into());
+            if wraps_camera_control(&args) {
+                return Err(
+                    "run `osmo stream` or `osmo gps` directly, without the camera Wi-Fi wrapper"
+                        .into(),
+                );
             }
             osmo_cli::wifi::run(return_to.as_deref(), &args, wake_camera_for_wifi)
         }
@@ -954,6 +1112,7 @@ fn run() -> Result<(), String> {
             stabilization,
             model,
         }),
+        Cmd::Gps { device } => gps_cmd(device),
         Cmd::Ls {
             ip,
             port,
@@ -1059,7 +1218,8 @@ fn run() -> Result<(), String> {
                 | Cmd::Marks { .. }
                 | Cmd::Burst { .. }
                 | Cmd::WithWifi { .. }
-                | Cmd::Stream { .. } => {
+                | Cmd::Stream { .. }
+                | Cmd::Gps { .. } => {
                     unreachable!("handled above")
                 }
             }
@@ -1098,7 +1258,8 @@ mod tests {
 
     #[test]
     fn wifi_wrapper_refuses_a_nested_livestream() {
-        assert!(wraps_stream(&["-v".into(), "stream".into()]));
-        assert!(!wraps_stream(&["get".into(), "stream".into()]));
+        assert!(wraps_camera_control(&["-v".into(), "stream".into()]));
+        assert!(!wraps_camera_control(&["get".into(), "stream".into()]));
+        assert!(wraps_camera_control(&["gps".into()]));
     }
 }

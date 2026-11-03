@@ -53,6 +53,7 @@ BLE pair -> read WiFi credentials -> (user joins the camera's WiFi) -> TCP-7001 
 ## Not implemented (by design, for now)
 
 Time sync and un-favourite remain unverified or non-working on the Action 4; burst and highlights are ported but
-not yet verified with a real burst or marked video. RTMP livestream is ported and fake-tested, but not yet verified
-on hardware in osmo-core. Not implemented: trimmed download, GPS sync, drones,
+not yet verified with a real burst or marked video. RTMP livestream and R-SDK GPS sync are ported and fake-tested,
+but not yet verified on hardware in osmo-core. GPS location must come from a platform-specific source.
+Not implemented: trimmed download, drones,
 delete of files older than the newest page, Xtra rebadges, auto WiFi join.

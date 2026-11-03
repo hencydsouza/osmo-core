@@ -81,6 +81,19 @@ pub struct BtleplugLink {
 }
 
 pub fn connect(rt: Arc<Runtime>, found: &Found) -> Result<BtleplugLink, String> {
+    connect_inner(rt, found, true)
+}
+
+/// R-SDK uses the same characteristics but does not arm the DUML pairing characteristic.
+pub fn connect_rsdk(rt: Arc<Runtime>, found: &Found) -> Result<BtleplugLink, String> {
+    connect_inner(rt, found, false)
+}
+
+fn connect_inner(
+    rt: Arc<Runtime>,
+    found: &Found,
+    arm_pairing: bool,
+) -> Result<BtleplugLink, String> {
     let p = found.peripheral.clone();
     let (fff5_c, rx) = rt.block_on(async {
         p.connect().await.map_err(bt_err)?;
@@ -106,10 +119,12 @@ pub fn connect(rt: Arc<Runtime>, found: &Found) -> Result<BtleplugLink, String> 
                 }
             }
         });
-        // Arm pairing: write 01 00 to fff4 (with response).
-        p.write(&c4, &[0x01, 0x00], WriteType::WithResponse)
-            .await
-            .map_err(bt_err)?;
+        if arm_pairing {
+            // DUML pairing only: R-SDK has its own approval handshake.
+            p.write(&c4, &[0x01, 0x00], WriteType::WithResponse)
+                .await
+                .map_err(bt_err)?;
+        }
         Ok::<_, String>((c5, rx))
     })?;
     Ok(BtleplugLink {
