@@ -82,6 +82,7 @@ enum Cmd {
         highlights: bool,
     },
     /// Show a video's highlight marks (the moments tagged while recording). PATH is as `osmo ls` prints it.
+    /// UNVERIFIED on an Action 4: a clip without marks gets 'bad parameter' (0xe3), and no clip here has marks.
     Marks {
         path: String,
         #[arg(long, default_value = CAMERA_IP)]

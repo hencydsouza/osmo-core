@@ -158,3 +158,5 @@ multi-attempt download *with* keepalive (no cuts happened in either keepalive ru
 - `osmo -v marks` on `DJI_20261101084646_0008_D.MP4` (handle 0x00040080): the camera replied status `0xe3`.
 - Osmosis's status table: `e3` = "supported, bad/missing parameter" (not `e0`, "not supported"). So the Action 4 implements `0x02/0xFF` but rejected this request: wrong handle form or payload, or simply a clip with no marks. Not yet known which.
 - Next step: `osmo ls --highlights` (camera-side filter, list query byte 37 = 2) shows whether any clip carries marks at all.
+
+- `osmo -v ls --highlights` returned a well-formed empty list (end frame seen): no clip on this card carries marks. That makes the earlier `e3` most likely "this clip has no marks", but a tagged clip is needed to prove it and to test the mark decoder against a real reply.
