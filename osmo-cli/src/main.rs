@@ -7,6 +7,7 @@ use osmo_cli::listing::{
     progress_line, resolve_requested, sidecars_to_fetch, thumb_sources, truncation_warning,
     validate_get_path, zone_from_link, ThumbSource,
 };
+use osmo_cli::listing::{filter_files, Kind};
 use osmo_cli::{config, route::route_warning};
 use osmo_core::ble::{model_name, pair_and_read_wifi, PairOptions};
 use osmo_core::datalink::{has_media_records, CameraSession, SessionConfig, SessionError};
@@ -67,6 +68,15 @@ enum Cmd {
         /// Files per store per query, 1 to 255 (default 45). A small value exercises paging on a small card.
         #[arg(long, value_parser = clap::value_parser!(u8).range(1..))]
         page_size: Option<u8>,
+        /// Only photos.
+        #[arg(long, conflicts_with = "videos")]
+        photos: bool,
+        /// Only videos.
+        #[arg(long)]
+        videos: bool,
+        /// Only favourites (starred).
+        #[arg(long)]
+        starred: bool,
     },
     /// Delete files from the camera. IRREVERSIBLE. Paths are exactly as `osmo ls` prints them (no globs). Without
     /// --yes it only prints what it would delete. Only files in the newest listing can be deleted.
@@ -212,6 +222,7 @@ fn ls_cmd(
     dump: Option<&PathBuf>,
     all: bool,
     page_size: Option<u8>,
+    filter: (Kind, bool),
     verbose: bool,
 ) -> Result<(), String> {
     let mut s = open_session(ip, port, verbose)?;
@@ -246,7 +257,10 @@ fn ls_cmd(
         }
     }
     s.close();
-    println!("{}", format_listing(&files?));
+    println!(
+        "{}",
+        format_listing(&filter_files(&files?, filter.0, filter.1))
+    );
     Ok(())
 }
 
@@ -669,7 +683,25 @@ fn run() -> Result<(), String> {
             dump,
             all,
             page_size,
-        } => ls_cmd(&ip, port, dump.as_ref(), all, page_size, cli.verbose),
+            photos,
+            videos,
+            starred,
+        } => {
+            let kind = match (photos, videos) {
+                (true, _) => Kind::Photos,
+                (_, true) => Kind::Videos,
+                _ => Kind::All,
+            };
+            ls_cmd(
+                &ip,
+                port,
+                dump.as_ref(),
+                all,
+                page_size,
+                (kind, starred),
+                cli.verbose,
+            )
+        }
         Cmd::Get {
             paths,
             out,

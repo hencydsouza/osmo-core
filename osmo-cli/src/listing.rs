@@ -214,6 +214,27 @@ pub fn resolve_requested<'a>(
     (found, missing)
 }
 
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Kind {
+    All,
+    Photos,
+    Videos,
+}
+
+/// Osmosis's gallery chips: photos or videos, and favourites only.
+pub fn filter_files(files: &[CameraFile], kind: Kind, starred_only: bool) -> Vec<CameraFile> {
+    files
+        .iter()
+        .filter(|f| match kind {
+            Kind::All => true,
+            Kind::Photos => !f.is_video(),
+            Kind::Videos => f.is_video(),
+        })
+        .filter(|f| !starred_only || f.starred)
+        .cloned()
+        .collect()
+}
+
 pub fn download_summary(saved: usize, skipped: usize, failed: usize) -> String {
     format!("{saved} saved, {skipped} already complete, {failed} failed")
 }
@@ -655,6 +676,39 @@ mod tests {
         assert_eq!(
             download_summary(2, 1, 0),
             "2 saved, 1 already complete, 0 failed"
+        );
+    }
+
+    #[test]
+    fn filter_files_keeps_photos_videos_or_starred_and_combines() {
+        let mk = |path: &str, ext: &str, starred: bool| CameraFile {
+            ext: ext.into(),
+            starred,
+            ..file(path, 0, 10)
+        };
+        let files = vec![
+            mk("DCIM/a/A_0001_D.JPG", "JPG", true),
+            mk("DCIM/a/B_0002_D.MP4", "MP4", true),
+            mk("DCIM/a/C_0003_D.MP4", "MP4", false),
+            mk("DCIM/a/D_0004_D.JPG", "JPG", false),
+        ];
+        let names = |v: Vec<CameraFile>| v.into_iter().map(|f| f.name).collect::<Vec<_>>();
+        assert_eq!(names(filter_files(&files, Kind::All, false)).len(), 4);
+        assert_eq!(
+            names(filter_files(&files, Kind::Photos, false)),
+            ["A_0001_D.JPG", "D_0004_D.JPG"]
+        );
+        assert_eq!(
+            names(filter_files(&files, Kind::Videos, false)),
+            ["B_0002_D.MP4", "C_0003_D.MP4"]
+        );
+        assert_eq!(
+            names(filter_files(&files, Kind::All, true)),
+            ["A_0001_D.JPG", "B_0002_D.MP4"]
+        );
+        assert_eq!(
+            names(filter_files(&files, Kind::Videos, true)),
+            ["B_0002_D.MP4"]
         );
     }
 }
