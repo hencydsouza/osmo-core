@@ -81,7 +81,7 @@ enum Cmd {
         #[arg(long, default_value_t = 9004)]
         port: u16,
     },
-    /// Set the camera's clock and time zone from this computer's.
+    /// Set the camera's clock and time zone from this computer's. NOT WORKING on an Action 4: it answers 'refused' (0xe0).
     SyncTime {
         #[arg(long, default_value = CAMERA_IP)]
         ip: String,
