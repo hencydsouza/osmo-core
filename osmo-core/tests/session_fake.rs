@@ -1181,3 +1181,23 @@ fn highlights_with_no_reply_or_no_handle_are_errors_not_empty() {
     };
     assert_eq!(s.highlights(&no_handle), Err(WriteError::NoHandle));
 }
+
+#[test]
+fn highlights_only_sets_byte_37_of_the_list_query() {
+    let run = |only: bool| {
+        let frames = manifest_frames(&live_manifest(), 1);
+        let (cam, log) = FakeCamera::new(Box::new(move |ctr, n| {
+            if ctr == 1 && n == 0 {
+                frames.clone()
+            } else {
+                vec![]
+            }
+        }));
+        let mut s = session(cam);
+        s.set_highlights_only(only);
+        s.list_newest().unwrap();
+        sd_page_queries(&log)[0][37]
+    };
+    assert_eq!(run(false), 0, "default lists everything");
+    assert_eq!(run(true), 2, "only files carrying highlight marks");
+}

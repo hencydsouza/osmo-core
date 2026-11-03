@@ -152,3 +152,9 @@ multi-attempt download *with* keepalive (no cuts happened in either keepalive ru
 - `osmo -v sync-time` registered fine, then the camera answered `0x00/0x6A` with status `0x00e0` (refused), the same code it gives `0x02/0x0C`.
 - Osmosis verified this command on a Nano only, and ignores the reply, so it would never have noticed a refusal.
 - Our registration steps and payload bytes match Osmosis's. Whether the camera clock changed anyway is not yet confirmed.
+
+## Highlight marks on the Action 4 (2026-11-04): camera answers e3
+
+- `osmo -v marks` on `DJI_20261101084646_0008_D.MP4` (handle 0x00040080): the camera replied status `0xe3`.
+- Osmosis's status table: `e3` = "supported, bad/missing parameter" (not `e0`, "not supported"). So the Action 4 implements `0x02/0xFF` but rejected this request: wrong handle form or payload, or simply a clip with no marks. Not yet known which.
+- Next step: `osmo ls --highlights` (camera-side filter, list query byte 37 = 2) shows whether any clip carries marks at all.

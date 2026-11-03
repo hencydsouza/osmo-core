@@ -77,6 +77,9 @@ enum Cmd {
         /// Only favourites (starred).
         #[arg(long)]
         starred: bool,
+        /// Only videos the camera says carry highlight marks (the camera does the filtering, over the whole store).
+        #[arg(long)]
+        highlights: bool,
     },
     /// Show a video's highlight marks (the moments tagged while recording). PATH is as `osmo ls` prints it.
     Marks {
@@ -224,16 +227,24 @@ fn list_pages(
     Ok(files)
 }
 
+#[derive(Clone, Copy)]
+struct LsFilter {
+    kind: Kind,
+    starred: bool,
+    highlights: bool,
+}
+
 fn ls_cmd(
     ip: &str,
     port: u16,
     dump: Option<&PathBuf>,
     all: bool,
     page_size: Option<u8>,
-    filter: (Kind, bool),
+    filter: LsFilter,
     verbose: bool,
 ) -> Result<(), String> {
     let mut s = open_session(ip, port, verbose)?;
+    s.set_highlights_only(filter.highlights);
     if let Some(n) = page_size {
         s.set_page_size(n);
     }
@@ -267,7 +278,7 @@ fn ls_cmd(
     s.close();
     println!(
         "{}",
-        format_listing(&filter_files(&files?, filter.0, filter.1))
+        format_listing(&filter_files(&files?, filter.kind, filter.starred))
     );
     Ok(())
 }
@@ -713,6 +724,7 @@ fn run() -> Result<(), String> {
             photos,
             videos,
             starred,
+            highlights,
         } => {
             let kind = match (photos, videos) {
                 (true, _) => Kind::Photos,
@@ -725,7 +737,11 @@ fn run() -> Result<(), String> {
                 dump.as_ref(),
                 all,
                 page_size,
-                (kind, starred),
+                LsFilter {
+                    kind,
+                    starred,
+                    highlights,
+                },
                 cli.verbose,
             )
         }
