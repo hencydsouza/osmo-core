@@ -312,12 +312,17 @@ fn rm_cmd(paths: &[String], yes: bool, ip: &str, port: u16, verbose: bool) -> Re
     let _ = config::save_write_counter(sess.next_write_counter());
     result.map_err(|e| e.to_string())?;
     eprintln!("The camera answered OK; checking the files are gone ...");
-    let after = sess.list_newest().map_err(|e| {
-        format!(
-            "the camera answered OK but the check failed ({}): run `osmo ls` to see what is left",
-            session_err(e)
-        )
-    })?;
+    // Check on a fresh session: a second handshake on the same session makes the camera answer empty.
+    drop(sess);
+    let after = open_session(ip, port, verbose)
+        .map_err(|e| format!("{e}\nthe camera answered OK but the check could not start: run `osmo ls` to see what is left"))?
+        .list_newest()
+        .map_err(|e| {
+            format!(
+                "the camera answered OK but the check failed ({}): run `osmo ls` to see what is left",
+                session_err(e)
+            )
+        })?;
     if after.is_empty() {
         return Err("the camera answered OK but the check returned no files at all, so it cannot be confirmed: run `osmo ls`".to_string());
     }

@@ -29,7 +29,16 @@ osmo wifi                     # print the camera's WiFi name and password
 # join that WiFi on this machine (the camera has no internet)
 osmo ls                       # list the newest media (needs the camera's WiFi)
 osmo get DCIM/100MEDIA/DJI_20260101_0001_D.MP4 -o ~/Movies/osmo
+osmo ls --all                 # every file, paged (--page-size N to force small pages)
+osmo thumb <path> -o t.jpg    # the camera's thumbnail
+osmo star <path>              # favourite a file (--off does NOT work on an Action 4)
+osmo rm <path>                # dry run: shows what would be deleted
+osmo rm <path> --yes          # really delete (cannot be undone)
 ```
+
+`rm` deletes only exact paths from the newest listing, all or nothing: a typo, glob, or a file without a verified
+handle refuses the whole command and nothing is sent. It confirms on a fresh session that the files are gone
+and reports an error if the camera said OK but they are still listed.
 
 `get` takes the path exactly as `ls` prints it and resumes a partial file (Ctrl-C leaves a resumable partial
 file; the camera leaves playback mode on its own a few seconds later). It holds the datalink open while

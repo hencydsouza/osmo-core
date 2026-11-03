@@ -48,5 +48,5 @@ BLE pair -> read WiFi credentials -> (user joins the camera's WiFi) -> TCP-7001 
 
 ## Not implemented (by design, for now)
 
-Time sync, delete, favourite, burst/highlights, thumbnails, trimmed download, RTMP livestream, GPS sync, drones,
-paging beyond the newest 45 files per store, Xtra rebadges, auto WiFi join.
+Time sync, un-favourite on the Action 4, burst/highlights, trimmed download, RTMP livestream, GPS sync, drones,
+delete of files older than the newest page, Xtra rebadges, auto WiFi join.

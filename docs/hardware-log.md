@@ -136,3 +136,13 @@ multi-attempt download *with* keepalive (no cuts happened in either keepalive ru
   It failed with counter 1 (separate process) and with the clock-seeded counter, so the counter is not the cause.
 - Osmosis restarts counters at 1 per session and only unit-tests the off payload; un-favourite was never hardware-verified.
 - Open: the correct un-favourite encoding for the Action 4. Delete not started.
+
+## HW-D: delete (2026-11-03) - delete live-verified, confirmation step fixed after
+
+- Dry run on a throwaway photo printed `would delete:` and `Nothing was deleted`; a following `ls` still listed it.
+- A typo path was refused by name (`not in the camera's newest listing`) and nothing was sent.
+- `rm --yes`: the camera answered OK (status 0) and the photo was gone from the next `osmo ls` (14 files; owner's
+  photo count back to 14). Live-verified.
+- The in-command check failed: it re-listed on the SAME session, the camera answered on a different channel and
+  returned 0 files, so `rm` reported "cannot be confirmed" although the delete worked. Fixed: the check now runs on a
+  fresh session, like `star`. Not yet re-verified live.
