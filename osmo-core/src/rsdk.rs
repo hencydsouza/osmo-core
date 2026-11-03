@@ -195,6 +195,19 @@ pub fn gps_payload(fix: &GpsFix) -> Result<[u8; 48], Error> {
     {
         return Err(Error::InvalidFix("velocity must be finite"));
     }
+    if [
+        fix.vertical_accuracy_mm,
+        fix.horizontal_accuracy_mm,
+        fix.speed_accuracy_cm_s,
+        fix.satellites,
+    ]
+    .iter()
+    .any(|v| *v > i32::MAX as u32)
+    {
+        return Err(Error::InvalidFix(
+            "accuracy or satellite count out of range",
+        ));
+    }
     let year = fix.date / 10000;
     let month = (fix.date / 100) % 100;
     let day = fix.date % 100;
@@ -207,7 +220,7 @@ pub fn gps_payload(fix: &GpsFix) -> Result<[u8; 48], Error> {
         2 => 28,
         _ => 0,
     };
-    if year == 0
+    if !(1..=9999).contains(&year)
         || day == 0
         || day > max_day
         || fix.time / 10000 > 23

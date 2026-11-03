@@ -90,6 +90,69 @@ pub fn last_device() -> Option<String> {
     last_device_in(&config_dir().ok()?)
 }
 
+/// Stable R-SDK identity; never silently replace an invalid existing identity.
+pub fn load_or_create_rsdk_identity_in(dir: &Path) -> io::Result<osmo_core::rsdk::Identity> {
+    use std::io::Write;
+    let path = dir.join("rsdk_identity");
+    let parse = |s: &str| -> io::Result<osmo_core::rsdk::Identity> {
+        let (id, mac) = s
+            .trim()
+            .split_once(':')
+            .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "invalid R-SDK identity"))?;
+        if id.len() != 8 || mac.len() != 12 || !id.is_ascii() || !mac.is_ascii() {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "invalid R-SDK identity",
+            ));
+        }
+        let device_id = u32::from_str_radix(id, 16)
+            .map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "invalid R-SDK identity"))?;
+        if device_id == 0 {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "invalid R-SDK identity",
+            ));
+        }
+        let mut mac_bytes = [0; 6];
+        for (i, byte) in mac_bytes.iter_mut().enumerate() {
+            *byte = u8::from_str_radix(&mac[i * 2..i * 2 + 2], 16).map_err(|_| {
+                io::Error::new(io::ErrorKind::InvalidData, "invalid R-SDK identity")
+            })?;
+        }
+        Ok(osmo_core::rsdk::Identity {
+            device_id,
+            mac: mac_bytes,
+        })
+    };
+    match fs::read_to_string(&path) {
+        Ok(s) => return parse(&s),
+        Err(e) if e.kind() == io::ErrorKind::NotFound => {}
+        Err(e) => return Err(e),
+    }
+    fs::create_dir_all(dir)?;
+    let random = osmo_core::duml::commands::new_install_identity().replace('-', "");
+    let device_id = u32::from_str_radix(&random[..8], 16)
+        .map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "cannot create R-SDK identity"))?
+        | 1;
+    let value = format!("{device_id:08x}:{}", &random[8..20]);
+    match fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&path)
+    {
+        Ok(mut f) => f.write_all(value.as_bytes())?,
+        Err(e) if e.kind() == io::ErrorKind::AlreadyExists => {
+            return parse(&fs::read_to_string(path)?)
+        }
+        Err(e) => return Err(e),
+    }
+    parse(&value)
+}
+
+pub fn load_or_create_rsdk_identity() -> io::Result<osmo_core::rsdk::Identity> {
+    load_or_create_rsdk_identity_in(&config_dir()?)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -100,6 +163,17 @@ mod tests {
         let a = load_or_create_identity_in(d.path()).unwrap();
         let b = load_or_create_identity_in(d.path()).unwrap();
         assert_eq!(a, b);
+    }
+
+    #[test]
+    fn rsdk_identity_is_stable_and_malformed_identity_is_not_silently_replaced() {
+        let d = tempfile::tempdir().unwrap();
+        let a = load_or_create_rsdk_identity_in(d.path()).unwrap();
+        let b = load_or_create_rsdk_identity_in(d.path()).unwrap();
+        assert_eq!((a.device_id, a.mac), (b.device_id, b.mac));
+        assert_ne!(a.device_id, 0);
+        std::fs::write(d.path().join("rsdk_identity"), "bad").unwrap();
+        assert!(load_or_create_rsdk_identity_in(d.path()).is_err());
     }
 
     #[test]
