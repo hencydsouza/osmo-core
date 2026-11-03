@@ -161,4 +161,10 @@ multi-attempt download *with* keepalive (no cuts happened in either keepalive ru
 
 - `osmo -v ls --highlights` returned an empty list with an end frame. The filter has not been checked with a known marked clip, so this does not prove the card has no marks or explain `e3`. A known tagged clip is needed to test both filter and decoder.
 
-- macOS Wi-Fi helper: a live attempt to join the Action 4 hotspot immediately after BLE wake returned "Could not find network"; another attempt returned `-3900`. Rejoining the saved home network without a password also returned `-3900`. Both SSIDs were in the preferred-network list. The cause is unconfirmed; retries and Keychain-supplied passwords are implemented but need live verification.
+- macOS Wi-Fi helper: initial attempts without passwords returned "Could not find network" or `-3900` for the Action 4 hotspot and the home network, despite both SSIDs being preferred. The cause is unconfirmed.
+
+## macOS Wi-Fi helper on the Action 4 (2026-11-04)
+
+- `osmo with-wifi -- -v ls` woke the camera over BLE, joined its hotspot, listed 14 files, and requested reconnection to the home network. It retrieved the camera password via BLE and used the locally configured home password.
+- macOS hid the current SSID, so the helper could not verify reconnection by name. Afterward, the Wi-Fi interface's IP address and default gateway matched those observed before switching, consistent with returning to the home network but not conclusive proof of its SSID.
+- No listed file had a burst suffix. Burst expansion still requires a live test with a newly recorded burst.
