@@ -1,8 +1,8 @@
 //! Datalink session against a scripted fake camera that replays the captured manifests.
 //! Fixture-tested only: this proves our side of the protocol, not that a real camera accepts it.
 use osmo_core::datalink::{
-    decode_manifest, delete_payload, favourite_payload, tcp_poke_bytes, tcp_poke_to, CameraSession,
-    Datagram, SessionError, Timing, WriteError,
+    decode_manifest, delete_payload, favourite_payload, set_time_payload, tcp_poke_bytes,
+    tcp_poke_to, CameraSession, Datagram, SessionError, Timing, WriteError,
 };
 use osmo_core::duml::commands::DEFAULT_IDENTIFIER;
 use osmo_core::duml::{pack_string, Frame};
@@ -15,6 +15,7 @@ use std::time::{Duration, Instant};
 #[derive(Clone, Debug)]
 struct Sent {
     pkt_type: u8,
+    target: u16,
     set: u8,
     cmd: u8,
     payload: Vec<u8>,
@@ -148,6 +149,7 @@ impl Datagram for FakeCamera {
         let pkt_type = pkt[6];
         let mut s = Sent {
             pkt_type,
+            target: 0,
             set: 0xFF,
             cmd: 0xFF,
             payload: pkt[8..].to_vec(),
@@ -160,6 +162,7 @@ impl Datagram for FakeCamera {
         if pkt_type == 5 {
             let f = Frame::decode(&pkt[20..]).expect("session sent a malformed DUML frame");
             (s.set, s.cmd, s.payload) = (f.cmd_set(), f.cmd_id(), f.payload.clone());
+            s.target = f.target;
             if (s.set, s.cmd) == (0x02, 0x0C) && s.payload == [1, 1, 0, 1] {
                 match self.playback {
                     Playback::Works => self.inbox.push_back(playback_status()),
@@ -1041,4 +1044,77 @@ fn delete_on_an_old_session_is_refused_without_sending() {
         Err(WriteError::SessionTooOld { .. })
     ));
     assert!(delete_frames(&log).is_empty());
+}
+
+#[test]
+fn sync_time_sends_one_0x00_0x6a_frame_to_the_system_receiver() {
+    let (mut s, log, _files) = deletable_session(Some(vec![0x00, 0x00]), Timing::fast());
+    let r = s.sync_time(1_700_000_000, 330, "Asia/Kolkata");
+    let sent: Vec<_> = log
+        .lock()
+        .unwrap()
+        .iter()
+        .filter(|x| (x.set, x.cmd) == (0x00, 0x6A))
+        .cloned()
+        .collect();
+    assert_eq!(sent.len(), 1, "{r:?}");
+    assert_eq!(
+        sent[0].payload,
+        set_time_payload(1_700_000_000, 330, "Asia/Kolkata")
+    );
+    assert_eq!(
+        sent[0].target >> 8,
+        0x28,
+        "receiver (id 1 << 5) | type 0x08"
+    );
+}
+
+#[test]
+fn sync_time_refuses_a_zone_name_that_is_not_ascii_before_sending() {
+    let (mut s, log, _files) = deletable_session(None, Timing::fast());
+    assert!(s.sync_time(0, 0, "Zürich").is_err());
+    assert!(!log
+        .lock()
+        .unwrap()
+        .iter()
+        .any(|x| (x.set, x.cmd) == (0x00, 0x6A)));
+}
+
+#[test]
+fn sync_time_on_an_unregistered_session_is_refused_without_sending() {
+    let (cam, log) = FakeCamera::new(Box::new(|_, _| vec![]));
+    let mut s = session(cam);
+    assert!(matches!(
+        s.sync_time(1, 0, "UTC"),
+        Err(WriteError::NotRegistered)
+    ));
+    assert!(!log
+        .lock()
+        .unwrap()
+        .iter()
+        .any(|x| (x.set, x.cmd) == (0x00, 0x6A)));
+}
+
+#[test]
+fn register_then_sync_time_sends_the_frame_and_register_is_idempotent() {
+    let (cam, log) = FakeCamera::new(Box::new(|_, _| vec![]));
+    let mut s = session(cam);
+    let count = |log: &Log| {
+        log.lock()
+            .unwrap()
+            .iter()
+            .filter(|x| x.pkt_type == 0)
+            .count()
+    };
+    s.register().unwrap();
+    let once = count(&log);
+    assert!(once >= 1);
+    s.register().unwrap();
+    assert_eq!(count(&log), once, "no second handshake");
+    let _ = s.sync_time(1, 0, "UTC");
+    assert!(log
+        .lock()
+        .unwrap()
+        .iter()
+        .any(|x| (x.set, x.cmd) == (0x00, 0x6A)));
 }

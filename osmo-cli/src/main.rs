@@ -3,8 +3,9 @@ mod ble_btleplug;
 use clap::{Parser, Subcommand};
 use osmo_cli::listing::{
     dest_filename, download_error_message, file_from_path, fill_unknown_sizes, format_listing,
-    format_status, human_size, known_size, plan_deletions, progress_line, sidecars_to_fetch,
-    thumb_sources, truncation_warning, validate_get_path, ThumbSource,
+    format_status, human_size, known_size, parse_utc_offset, plan_deletions, progress_line,
+    sidecars_to_fetch, thumb_sources, truncation_warning, validate_get_path, zone_from_link,
+    ThumbSource,
 };
 use osmo_cli::{config, route::route_warning};
 use osmo_core::ble::{model_name, pair_and_read_wifi, PairOptions};
@@ -75,6 +76,13 @@ enum Cmd {
         /// Really delete. Without this nothing is sent to the camera.
         #[arg(long)]
         yes: bool,
+        #[arg(long, default_value = CAMERA_IP)]
+        ip: String,
+        #[arg(long, default_value_t = 9004)]
+        port: u16,
+    },
+    /// Set the camera's clock and time zone from this computer's.
+    SyncTime {
         #[arg(long, default_value = CAMERA_IP)]
         ip: String,
         #[arg(long, default_value_t = 9004)]
@@ -275,6 +283,40 @@ fn star_cmd(path: &str, on: bool, ip: &str, port: u16, verbose: bool) -> Result<
             "warning: a fresh listing does not show the change yet; run `osmo ls` to check"
         ),
         None => eprintln!("warning: could not find the file again to confirm"),
+    }
+    Ok(())
+}
+
+// shortcut: macOS/Linux only (`date`, /etc/localtime); Windows needs another source, when a Windows shell exists.
+fn local_time() -> Result<(u64, i16, String), String> {
+    let secs = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_err(|e| e.to_string())?
+        .as_secs();
+    let z = std::process::Command::new("date")
+        .arg("+%z")
+        .output()
+        .map_err(|e| format!("could not run `date`: {e}"))?;
+    let offset = parse_utc_offset(&String::from_utf8_lossy(&z.stdout))
+        .ok_or("could not read this computer's UTC offset from `date +%z`")?;
+    let zone = std::fs::read_link("/etc/localtime")
+        .ok()
+        .and_then(|p| zone_from_link(&p.to_string_lossy()))
+        .ok_or("could not read this computer's time zone name from /etc/localtime")?;
+    Ok((secs, offset, zone))
+}
+
+fn sync_time_cmd(ip: &str, port: u16, verbose: bool) -> Result<(), String> {
+    let (secs, offset, zone) = local_time()?;
+    let mut sess = open_session(ip, port, verbose)?;
+    sess.register().map_err(session_err)?;
+    eprintln!("Setting the camera clock to {secs} (UTC{offset:+} min, {zone}) ...");
+    match sess.sync_time(secs, offset, &zone) {
+        Ok(()) => println!("The camera acknowledged the new time."),
+        Err(osmo_core::datalink::WriteError::NoReply) => println!(
+            "Sent, but the camera did not acknowledge (Osmosis does not wait for one either): check the clock on the camera."
+        ),
+        Err(e) => return Err(e.to_string()),
     }
     Ok(())
 }
@@ -582,6 +624,7 @@ fn run() -> Result<(), String> {
             port,
             storage,
         } => thumb_cmd(&path, &out, &ip, port, storage, cli.verbose),
+        Cmd::SyncTime { ip, port } => sync_time_cmd(&ip, port, cli.verbose),
         Cmd::Rm {
             paths,
             yes,
@@ -622,7 +665,8 @@ fn run() -> Result<(), String> {
                 | Cmd::Get { .. }
                 | Cmd::Thumb { .. }
                 | Cmd::Star { .. }
-                | Cmd::Rm { .. } => {
+                | Cmd::Rm { .. }
+                | Cmd::SyncTime { .. } => {
                     unreachable!("handled above")
                 }
             }

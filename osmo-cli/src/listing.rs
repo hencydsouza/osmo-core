@@ -237,6 +237,29 @@ pub fn plan_deletions<'a>(
     }
 }
 
+/// `date +%z` output (`+0530`, `-0700`) as signed minutes east of UTC.
+pub fn parse_utc_offset(s: &str) -> Option<i16> {
+    let b = s.trim().as_bytes();
+    if b.len() != 5 || !b[1..].iter().all(u8::is_ascii_digit) || !matches!(b[0], b'+' | b'-') {
+        return None;
+    }
+    let n = |i: usize| ((b[i] - b'0') * 10 + b[i + 1] - b'0') as i16;
+    let (h, m) = (n(1), n(3));
+    if h > 14 || m > 59 {
+        return None;
+    }
+    let mins = h * 60 + m;
+    Some(if b[0] == b'-' { -mins } else { mins })
+}
+
+/// The IANA zone name from the target of `/etc/localtime`, e.g. `Asia/Kolkata`.
+pub fn zone_from_link(target: &str) -> Option<String> {
+    target
+        .split_once("zoneinfo/")
+        .map(|(_, z)| z.to_string())
+        .filter(|z| !z.is_empty())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -557,5 +580,27 @@ mod tests {
             assert_eq!(err.len(), 1, "{bad}");
         }
         assert!(plan_deletions(&files, &[]).unwrap_err()[0].contains("nothing"));
+    }
+
+    #[test]
+    fn utc_offset_parses_date_z_output() {
+        assert_eq!(parse_utc_offset("+0530"), Some(330));
+        assert_eq!(parse_utc_offset("-0700\n"), Some(-420));
+        assert_eq!(parse_utc_offset("+0000"), Some(0));
+        assert_eq!(parse_utc_offset("IST"), None);
+        assert_eq!(parse_utc_offset("+05"), None);
+    }
+
+    #[test]
+    fn zone_name_comes_from_the_localtime_link() {
+        assert_eq!(
+            zone_from_link("/var/db/timezone/zoneinfo/Asia/Kolkata"),
+            Some("Asia/Kolkata".to_string())
+        );
+        assert_eq!(
+            zone_from_link("/usr/share/zoneinfo/UTC"),
+            Some("UTC".to_string())
+        );
+        assert_eq!(zone_from_link("/etc/something-else"), None);
     }
 }

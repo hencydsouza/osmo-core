@@ -12,4 +12,4 @@ pub use session::{
 };
 pub use stream::has_media_records;
 pub use transport::{routing_header, udp_header, Datagram, Transport, UdpPeer};
-pub use writes::{delete_payload, favourite_payload, WriteError};
+pub use writes::{delete_payload, favourite_payload, set_time_payload, WriteError};

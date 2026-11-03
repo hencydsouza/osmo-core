@@ -34,6 +34,7 @@ osmo thumb <path> -o t.jpg    # the camera's thumbnail
 osmo star <path>              # favourite a file (--off does NOT work on an Action 4)
 osmo rm <path>                # dry run: shows what would be deleted
 osmo rm <path> --yes          # really delete (cannot be undone)
+osmo sync-time                # set the camera's clock and time zone from this computer's
 ```
 
 `rm` deletes only exact paths from the newest listing, all or nothing: a typo, glob, or a file without a verified

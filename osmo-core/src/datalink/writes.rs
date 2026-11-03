@@ -15,6 +15,10 @@ pub enum WriteError {
     NoHandle,
     #[error("{0} has no verified, unshared handle, so it will not be deleted")]
     NotDeletable(String),
+    #[error("the session has not been registered with the camera yet")]
+    NotRegistered,
+    #[error("the time zone name must be ASCII and at most 255 bytes")]
+    BadZoneName,
     #[error("at most {max} files can be deleted at once")]
     TooMany { max: usize },
     #[error("the camera refused the command (status 0x{0:04x})")]
@@ -30,6 +34,16 @@ pub fn favourite_payload(handle: u32, counter: u32, on: bool) -> Vec<u8> {
     p.extend(handle.to_le_bytes());
     p.extend(counter.to_le_bytes());
     p.extend([0x00, u8::from(on), 0x00, 0x00, 0x00]);
+    p
+}
+
+/// `0x00/0x6A` set time: `01 00 [unix seconds:u64-LE] [UTC offset minutes:i16-LE] [name length:u8] [IANA zone name]`.
+pub fn set_time_payload(unix_secs: u64, utc_offset_min: i16, tz_id: &str) -> Vec<u8> {
+    let mut p = vec![0x01, 0x00];
+    p.extend(unix_secs.to_le_bytes());
+    p.extend(utc_offset_min.to_le_bytes());
+    p.push(tz_id.len() as u8);
+    p.extend(tz_id.as_bytes());
     p
 }
 
@@ -125,5 +139,18 @@ mod tests {
                 .replace(' ', "")
                 .as_str())
         );
+    }
+
+    #[test]
+    fn set_time_payload_is_unix_seconds_offset_and_zone_name() {
+        // 1_700_000_000 = 0x6553F100; +330 min = 0x014A; "Asia/Kolkata" is 12 bytes.
+        assert_eq!(
+            set_time_payload(1_700_000_000, 330, "Asia/Kolkata"),
+            hex("010000f1536500000000 4a01 0c 417369612f4b6f6c6b617461"
+                .replace(' ', "")
+                .as_str())
+        );
+        // West of UTC is a negative two's-complement i16: -300 = 0xFED4.
+        assert_eq!(&set_time_payload(0, -300, "")[10..], &[0xD4, 0xFE, 0x00]);
     }
 }
