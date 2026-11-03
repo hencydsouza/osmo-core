@@ -2,6 +2,68 @@
 use std::ffi::OsString;
 
 #[cfg(any(target_os = "macos", test))]
+struct WifiSettings {
+    return_to: Option<String>,
+    home_password: Option<String>,
+    camera_password: Option<String>,
+}
+
+#[cfg(any(target_os = "macos", test))]
+impl WifiSettings {
+    fn from_path(
+        path: &std::path::Path,
+        environment: impl Fn(&str) -> Option<String>,
+    ) -> Result<Self, String> {
+        let mut values = std::collections::HashMap::new();
+        match dotenvy::from_path_iter(path) {
+            Ok(iter) => {
+                for entry in iter {
+                    let (key, value) =
+                        entry.map_err(|_| "invalid .env file; check its syntax".to_string())?;
+                    if matches!(
+                        key.as_str(),
+                        "OSMO_RETURN_TO" | "OSMO_HOME_WIFI_PASSWORD" | "OSMO_CAMERA_WIFI_PASSWORD"
+                    ) {
+                        values.insert(key, value);
+                    }
+                }
+            }
+            Err(dotenvy::Error::Io(e)) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(_) => return Err("could not read .env file".into()),
+        }
+        let get = |key: &str| {
+            environment(key)
+                .or_else(|| values.get(key).cloned())
+                .filter(|value| !value.is_empty())
+        };
+        Ok(Self {
+            return_to: get("OSMO_RETURN_TO"),
+            home_password: get("OSMO_HOME_WIFI_PASSWORD"),
+            camera_password: get("OSMO_CAMERA_WIFI_PASSWORD"),
+        })
+    }
+
+    fn passwords_for(
+        &self,
+        original: &str,
+        camera: &str,
+    ) -> Result<std::collections::HashMap<String, String>, String> {
+        let home = self
+            .home_password
+            .clone()
+            .ok_or("set OSMO_HOME_WIFI_PASSWORD in .env before switching")?;
+        let camera_password = self
+            .camera_password
+            .clone()
+            .ok_or("set OSMO_CAMERA_WIFI_PASSWORD in .env before switching")?;
+        Ok(std::collections::HashMap::from([
+            (original.to_owned(), home),
+            (camera.to_owned(), camera_password),
+        ]))
+    }
+}
+
+#[cfg(any(target_os = "macos", test))]
 trait Host {
     fn current_network(&mut self) -> Option<String>;
     fn wake_camera(&mut self) -> Result<String, String>;
@@ -64,7 +126,7 @@ fn with_wifi(
         if switched {
             eprintln!("Connecting to camera Wi-Fi {camera} ...");
             join_with_retry(host, &camera, 6, true).map_err(|e| {
-                format!("{e}; check that the camera hotspot is awake and its Wi-Fi password is saved in macOS")
+                format!("{e}; check that the camera hotspot is awake and its Wi-Fi password in .env is correct")
             })?;
             joined_camera = true;
         }
@@ -141,10 +203,11 @@ mod macos {
 
     struct Mac {
         device: String,
+        settings: WifiSettings,
         passwords: HashMap<String, String>,
     }
     impl Mac {
-        fn new() -> Result<Self, String> {
+        fn new(settings: WifiSettings) -> Result<Self, String> {
             let out = Command::new("networksetup")
                 .arg("-listallhardwareports")
                 .output()
@@ -162,6 +225,7 @@ mod macos {
                     if let Some(device) = line.strip_prefix("Device: ") {
                         return Ok(Self {
                             device: device.to_owned(),
+                            settings,
                             passwords: HashMap::new(),
                         });
                     }
@@ -204,39 +268,7 @@ mod macos {
         }
 
         fn prepare_credentials(&mut self, original: &str, camera: &str) -> Result<(), String> {
-            for ssid in [original, camera] {
-                if self.passwords.contains_key(ssid) {
-                    continue;
-                }
-                self.check_interrupt()?;
-                eprintln!("Reading saved Wi-Fi password for {ssid} from Keychain ...");
-                let output = Command::new("security")
-                    .args([
-                        "find-generic-password",
-                        "-a",
-                        ssid,
-                        "-D",
-                        "AirPort network password",
-                        "-w",
-                    ])
-                    .output()
-                    .map_err(|e| format!("could not access Keychain: {e}"))?;
-                if !output.status.success() {
-                    return Err(format!("could not read the saved Wi-Fi password for {ssid} from Keychain; allow access or join the network once in macOS"));
-                }
-                let mut password = String::from_utf8(output.stdout)
-                    .map_err(|_| format!("the saved password for {ssid} is not UTF-8"))?;
-                if password.ends_with('\n') {
-                    password.pop();
-                    if password.ends_with('\r') {
-                        password.pop();
-                    }
-                }
-                if password.is_empty() {
-                    return Err(format!("the saved password for {ssid} is empty"));
-                }
-                self.passwords.insert(ssid.to_owned(), password);
-            }
+            self.passwords = self.settings.passwords_for(original, camera)?;
             Ok(())
         }
 
@@ -244,7 +276,7 @@ mod macos {
             let password = self
                 .passwords
                 .get(ssid)
-                .ok_or_else(|| format!("no saved password for {ssid}"))?;
+                .ok_or_else(|| format!("no configured password for {ssid}"))?;
             let out = Command::new("networksetup")
                 .args(["-setairportnetwork", &self.device, ssid, password])
                 .output()
@@ -339,8 +371,13 @@ mod macos {
 
     pub fn run(return_to: Option<&str>, args: &[OsString]) -> Result<(), String> {
         let _signals = SignalGuard::install()?;
-        let mut host = Mac::new()?;
-        super::with_wifi(&mut host, return_to, args)
+        let settings =
+            WifiSettings::from_path(std::path::Path::new(".env"), |key| std::env::var(key).ok())?;
+        let target = return_to
+            .map(str::to_owned)
+            .or_else(|| settings.return_to.clone());
+        let mut host = Mac::new(settings)?;
+        super::with_wifi(&mut host, target.as_deref(), args)
     }
 
     #[cfg(test)]
@@ -367,6 +404,56 @@ mod tests {
     use super::*;
     use std::ffi::OsString;
 
+    #[test]
+    fn loads_wifi_settings_from_dotenv_without_losing_special_characters() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join(".env");
+        std::fs::write(&path, "OSMO_RETURN_TO='Home WiFi'\nOSMO_HOME_WIFI_PASSWORD='home $ # pass'\nOSMO_CAMERA_WIFI_PASSWORD='camera=pass'\n").unwrap();
+        let settings = WifiSettings::from_path(&path, |_| None).unwrap();
+        assert_eq!(settings.return_to.as_deref(), Some("Home WiFi"));
+        assert_eq!(settings.home_password.as_deref(), Some("home $ # pass"));
+        assert_eq!(settings.camera_password.as_deref(), Some("camera=pass"));
+    }
+
+    #[test]
+    fn environment_overrides_dotenv_without_printing_malformed_secrets() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join(".env");
+        std::fs::write(&path, "OSMO_RETURN_TO='File WiFi'\n").unwrap();
+        let settings = WifiSettings::from_path(&path, |key| {
+            (key == "OSMO_RETURN_TO").then(|| "Shell WiFi".into())
+        })
+        .unwrap();
+        assert_eq!(settings.return_to.as_deref(), Some("Shell WiFi"));
+        std::fs::write(&path, "OSMO_HOME_WIFI_PASSWORD='private secret\n").unwrap();
+        let error = WifiSettings::from_path(&path, |_| None).err().unwrap();
+        assert!(!error.contains("private secret"));
+    }
+
+    #[test]
+    fn associates_each_configured_password_with_the_correct_network() {
+        let settings = WifiSettings {
+            return_to: Some("Home WiFi".into()),
+            home_password: Some("home secret".into()),
+            camera_password: Some("camera secret".into()),
+        };
+        let passwords = settings.passwords_for("Home WiFi", "Camera WiFi").unwrap();
+        assert_eq!(passwords.get("Home WiFi").unwrap(), "home secret");
+        assert_eq!(passwords.get("Camera WiFi").unwrap(), "camera secret");
+    }
+
+    #[test]
+    fn missing_password_is_reported_without_including_the_other_password() {
+        let settings = WifiSettings {
+            return_to: None,
+            home_password: Some("private home password".into()),
+            camera_password: None,
+        };
+        let error = settings.passwords_for("Home", "Camera").unwrap_err();
+        assert!(error.contains("OSMO_CAMERA_WIFI_PASSWORD"));
+        assert!(!error.contains("private home password"));
+    }
+
     struct Fake {
         current: Option<String>,
         joins: Vec<String>,
@@ -392,7 +479,7 @@ mod tests {
         }
         fn prepare_credentials(&mut self, _: &str, _: &str) -> Result<(), String> {
             if self.credentials_missing {
-                Err("Keychain access failed".into())
+                Err("missing configured password".into())
             } else {
                 Ok(())
             }
@@ -550,7 +637,7 @@ mod tests {
         h.credentials_missing = true;
         assert!(with_wifi(&mut h, None, &["ls".into()])
             .unwrap_err()
-            .contains("Keychain"));
+            .contains("password"));
         assert!(h.joins.is_empty());
     }
 

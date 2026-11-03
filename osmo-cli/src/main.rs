@@ -747,10 +747,7 @@ fn pair_cmd(
 fn run() -> Result<(), String> {
     let cli = Cli::parse();
     match cli.cmd {
-        Cmd::WithWifi { return_to, args } => {
-            let target = return_to.or_else(|| std::env::var("OSMO_RETURN_TO").ok());
-            osmo_cli::wifi::run(target.as_deref(), &args)
-        }
+        Cmd::WithWifi { return_to, args } => osmo_cli::wifi::run(return_to.as_deref(), &args),
         Cmd::Ls {
             ip,
             port,

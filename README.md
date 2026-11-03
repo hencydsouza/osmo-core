@@ -61,16 +61,17 @@ macOS: your terminal needs Bluetooth permission (System Settings > Privacy & Sec
 
 ### macOS Wi-Fi helper
 
-Join the camera's Wi-Fi once in macOS so its password is saved. Then the helper wakes the camera over Bluetooth,
-joins its Wi-Fi, runs an `osmo` command, and attempts to reconnect to the original network, including on failure
-or interruption:
+Copy `.env.example` to `.env` and fill in the home network name and both Wi-Fi passwords locally. The helper
+wakes the camera over Bluetooth, joins its Wi-Fi, runs an `osmo` command, and attempts to reconnect to the home
+network, including on failure or interruption:
 
 ```sh
 ./target/debug/osmo with-wifi -- -v ls
 ./target/debug/osmo with-wifi -- -v burst 'DCIM/DJI_001/your-burst-lead.JPG'
 ```
 
-macOS may hide the current Wi-Fi name from terminal programs. If it does, provide the network to return to:
+macOS may hide the current Wi-Fi name from terminal programs. `OSMO_RETURN_TO` in `.env` provides the network to
+return to; it can also be supplied explicitly:
 
 ```sh
 ./target/debug/osmo with-wifi --return-to 'Your home Wi-Fi' -- -v ls
@@ -79,10 +80,11 @@ export OSMO_RETURN_TO='Your home Wi-Fi'
 ./target/debug/osmo with-wifi -- -v ls
 ```
 
-The helper reads both saved Wi-Fi passwords from macOS Keychain before switching; macOS may ask you to allow
-access. It passes passwords as arguments to macOS `networksetup`, where other local processes can briefly see them,
-but does not save or print them. It currently expects the Action 4's `192.168.2.x` network. If macOS hides network
-names, it cannot verify the final reconnection; check the Wi-Fi menu if needed.
+The helper reads `.env` from the current working directory; existing environment variables take precedence. `.env`
+is gitignored and stores passwords in plaintext, so restrict file access. Passwords are also passed as arguments to
+macOS `networksetup`, where other local processes can briefly see them. The helper currently expects the Action 4's
+`192.168.2.x` network. If macOS hides network names, it cannot verify the final reconnection; check the Wi-Fi menu
+if needed.
 
 ## Develop
 
