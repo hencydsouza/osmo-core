@@ -37,6 +37,35 @@ pub fn favourite_payload(handle: u32, counter: u32, on: bool) -> Vec<u8> {
     p
 }
 
+/// `0x02/0xFF` highlight-marks request: `40 2f 00 01 0b 00 00 00 [video handle:u32-LE] 00 00`. Read-only.
+pub fn highlight_payload(handle: u32) -> Vec<u8> {
+    let mut p = vec![0x40, 0x2F, 0x00, 0x01, 0x0B, 0x00, 0x00, 0x00];
+    p.extend(handle.to_le_bytes());
+    p.extend([0x00, 0x00]);
+    p
+}
+
+/// The reply: `00 | 40 2f 00 01 | len:u32 | handle:u32 | count:u8 | 00 | { 00 ms:u32-LE } x count`. Marks in ms,
+/// ascending. A short reply is "no marks"; a whole mark that is cut off ends the list. The first byte is the
+/// status (not a 16-bit word: the next byte is `0x40`).
+pub fn parse_highlights(reply: &[u8]) -> Result<Vec<u32>, WriteError> {
+    if reply.first().is_some_and(|s| *s != 0) {
+        return Err(WriteError::Rejected(reply[0] as u16));
+    }
+    if reply.len() < 14 {
+        return Ok(Vec::new());
+    }
+    let mut marks: Vec<u32> = (0..reply[13] as usize)
+        .map_while(|k| {
+            reply
+                .get(16 + k * 5..20 + k * 5)
+                .map(|b| u32::from_le_bytes([b[0], b[1], b[2], b[3]]))
+        })
+        .collect();
+    marks.sort_unstable();
+    Ok(marks)
+}
+
 /// `0x00/0x6A` set time: `01 00 [unix seconds:u64-LE] [UTC offset minutes:i16-LE] [name length:u8] [IANA zone name]`.
 pub fn set_time_payload(unix_secs: u64, utc_offset_min: i16, tz_id: &str) -> Vec<u8> {
     let mut p = vec![0x01, 0x00];
@@ -152,5 +181,55 @@ mod tests {
         );
         // West of UTC is a negative two's-complement i16: -300 = 0xFED4.
         assert_eq!(&set_time_payload(0, -300, "")[10..], &[0xD4, 0xFE, 0x00]);
+    }
+
+    fn marks_reply(handle: u32, marks: &[u32]) -> Vec<u8> {
+        let mut r = vec![0x00, 0x40, 0x2F, 0x00, 0x01];
+        r.extend((7 + marks.len() as u32 * 5).to_le_bytes());
+        r.extend(handle.to_le_bytes());
+        r.push(marks.len() as u8);
+        r.push(0x00);
+        for m in marks {
+            r.push(0x00);
+            r.extend(m.to_le_bytes());
+        }
+        r
+    }
+
+    #[test]
+    fn highlight_payload_matches_the_documented_request() {
+        assert_eq!(
+            highlight_payload(0x4010_4480),
+            hex("402f00010b0000008044104000 00".replace(' ', "").as_str())
+        );
+    }
+
+    #[test]
+    fn parse_highlights_reads_marks_in_ascending_order() {
+        let r = marks_reply(0x4010_4480, &[7000, 4000]);
+        assert_eq!(r[13], 2, "count sits at byte 13");
+        assert_eq!(
+            r[16..20],
+            7000u32.to_le_bytes(),
+            "first mark at byte 16, stride 5"
+        );
+        assert_eq!(parse_highlights(&r), Ok(vec![4000, 7000]));
+    }
+
+    #[test]
+    fn parse_highlights_handles_none_truncation_and_refusal() {
+        assert_eq!(parse_highlights(&marks_reply(1, &[])), Ok(vec![]));
+        let mut cut = marks_reply(1, &[1000, 2000]);
+        cut.truncate(cut.len() - 3);
+        assert_eq!(
+            parse_highlights(&cut),
+            Ok(vec![1000]),
+            "stops at the last whole mark"
+        );
+        assert_eq!(parse_highlights(&[0x00, 0x40]), Ok(vec![]));
+        assert_eq!(
+            parse_highlights(&[0xE0, 0x40, 0x2F]),
+            Err(WriteError::Rejected(0xE0))
+        );
     }
 }

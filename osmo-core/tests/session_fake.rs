@@ -1,8 +1,8 @@
 //! Datalink session against a scripted fake camera that replays the captured manifests.
 //! Fixture-tested only: this proves our side of the protocol, not that a real camera accepts it.
 use osmo_core::datalink::{
-    decode_manifest, delete_payload, favourite_payload, set_time_payload, tcp_poke_bytes,
-    tcp_poke_to, CameraSession, Datagram, SessionError, Timing, WriteError,
+    decode_manifest, delete_payload, favourite_payload, highlight_payload, set_time_payload,
+    tcp_poke_bytes, tcp_poke_to, CameraSession, Datagram, SessionError, Timing, WriteError,
 };
 use osmo_core::duml::commands::DEFAULT_IDENTIFIER;
 use osmo_core::duml::{pack_string, Frame};
@@ -1117,4 +1117,87 @@ fn register_then_sync_time_sends_the_frame_and_register_is_idempotent() {
         .unwrap()
         .iter()
         .any(|x| (x.set, x.cmd) == (0x00, 0x6A)));
+}
+
+fn highlights_session(
+    reply: Option<Vec<u8>>,
+) -> (
+    CameraSession<FakeCamera>,
+    Log,
+    Vec<osmo_core::media::CameraFile>,
+) {
+    let frames = manifest_frames(&fixture("oa4_45.bin"), 1);
+    let (mut cam, log) = FakeCamera::new(Box::new(move |ctr, n| {
+        if ctr == 1 && n == 0 {
+            frames.clone()
+        } else {
+            vec![]
+        }
+    }));
+    cam.playback = Playback::RefusesUntilControl;
+    if let Some(p) = reply {
+        cam.write_replies.push(((0x02, 0xFF), p));
+    }
+    let mut s = session(cam);
+    let files = s.list_newest().unwrap();
+    (s, log, files)
+}
+
+#[test]
+fn highlights_send_0x02_0xff_and_decode_the_marks() {
+    let reply = {
+        let mut r = vec![0x00, 0x40, 0x2F, 0x00, 0x01, 17, 0, 0, 0, 0, 0, 0, 0, 2, 0];
+        for m in [4000u32, 7000] {
+            r.push(0);
+            r.extend(m.to_le_bytes());
+        }
+        r
+    };
+    let (mut s, log, files) = highlights_session(Some(reply));
+    let video = files
+        .iter()
+        .find(|f| f.is_video() && f.handle != 0)
+        .unwrap();
+    assert_eq!(s.highlights(video), Ok(vec![4000, 7000]));
+    let sent: Vec<_> = duml(&log)
+        .into_iter()
+        .filter(|(a, b, _)| (*a, *b) == (0x02, 0xFF))
+        .collect();
+    assert_eq!(sent.len(), 1);
+    assert_eq!(sent[0].2, highlight_payload(video.handle));
+}
+
+#[test]
+fn highlights_with_no_reply_or_no_handle_are_errors_not_empty() {
+    let (mut s, _log, files) = highlights_session(None);
+    let video = files
+        .iter()
+        .find(|f| f.is_video() && f.handle != 0)
+        .unwrap();
+    assert_eq!(s.highlights(video), Err(WriteError::NoReply));
+    let no_handle = osmo_core::media::CameraFile {
+        handle: 0,
+        ..video.clone()
+    };
+    assert_eq!(s.highlights(&no_handle), Err(WriteError::NoHandle));
+}
+
+#[test]
+fn highlights_only_sets_byte_37_of_the_list_query() {
+    let run = |only: bool| {
+        let frames = manifest_frames(&live_manifest(), 1);
+        let (cam, log) = FakeCamera::new(Box::new(move |ctr, n| {
+            if ctr == 1 && n == 0 {
+                frames.clone()
+            } else {
+                vec![]
+            }
+        }));
+        let mut s = session(cam);
+        s.set_highlights_only(only);
+        s.list_newest().unwrap();
+        sd_page_queries(&log)[0][37]
+    };
+    assert_eq!(run(false), 0, "default lists everything");
+    assert_eq!(run(true), 2, "only files carrying highlight marks");
 }

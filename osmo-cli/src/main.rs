@@ -7,7 +7,7 @@ use osmo_cli::listing::{
     progress_line, resolve_requested, sidecars_to_fetch, thumb_sources, truncation_warning,
     validate_get_path, zone_from_link, ThumbSource,
 };
-use osmo_cli::listing::{filter_files, Kind};
+use osmo_cli::listing::{filter_files, format_marks, Kind};
 use osmo_cli::{config, route::route_warning};
 use osmo_core::ble::{model_name, pair_and_read_wifi, PairOptions};
 use osmo_core::datalink::{has_media_records, CameraSession, SessionConfig, SessionError};
@@ -77,6 +77,18 @@ enum Cmd {
         /// Only favourites (starred).
         #[arg(long)]
         starred: bool,
+        /// Only videos the camera says carry highlight marks (the camera does the filtering, over the whole store).
+        #[arg(long)]
+        highlights: bool,
+    },
+    /// Show a video's highlight marks (the moments tagged while recording). PATH is as `osmo ls` prints it.
+    /// UNVERIFIED on an Action 4: a clip without marks gets 'bad parameter' (0xe3), and no clip here has marks.
+    Marks {
+        path: String,
+        #[arg(long, default_value = CAMERA_IP)]
+        ip: String,
+        #[arg(long, default_value_t = 9004)]
+        port: u16,
     },
     /// Delete files from the camera. IRREVERSIBLE. Paths are exactly as `osmo ls` prints them (no globs). Without
     /// --yes it only prints what it would delete. Only files in the newest listing can be deleted.
@@ -216,16 +228,24 @@ fn list_pages(
     Ok(files)
 }
 
+#[derive(Clone, Copy)]
+struct LsFilter {
+    kind: Kind,
+    starred: bool,
+    highlights: bool,
+}
+
 fn ls_cmd(
     ip: &str,
     port: u16,
     dump: Option<&PathBuf>,
     all: bool,
     page_size: Option<u8>,
-    filter: (Kind, bool),
+    filter: LsFilter,
     verbose: bool,
 ) -> Result<(), String> {
     let mut s = open_session(ip, port, verbose)?;
+    s.set_highlights_only(filter.highlights);
     if let Some(n) = page_size {
         s.set_page_size(n);
     }
@@ -259,7 +279,7 @@ fn ls_cmd(
     s.close();
     println!(
         "{}",
-        format_listing(&filter_files(&files?, filter.0, filter.1))
+        format_listing(&filter_files(&files?, filter.kind, filter.starred))
     );
     Ok(())
 }
@@ -335,6 +355,25 @@ fn sync_time_cmd(ip: &str, port: u16, verbose: bool) -> Result<(), String> {
         ),
         Err(e) => return Err(e.to_string()),
     }
+    Ok(())
+}
+
+fn marks_cmd(path: &str, ip: &str, port: u16, verbose: bool) -> Result<(), String> {
+    let path = validate_get_path(path)?;
+    let mut sess = open_session(ip, port, verbose)?;
+    eprintln!("Looking up {path} ...");
+    let found = sess.find_file(path).map_err(session_err)?;
+    warn_if_unconfirmed(&sess);
+    let file = found.ok_or(
+        "not found anywhere in the camera's library: check the path against `osmo ls --all`",
+    )?;
+    if !file.is_video() {
+        return Err(format!(
+            "{path} is not a video, so it has no highlight marks"
+        ));
+    }
+    let marks = sess.highlights(&file).map_err(|e| e.to_string())?;
+    println!("{}", format_marks(&marks));
     Ok(())
 }
 
@@ -686,6 +725,7 @@ fn run() -> Result<(), String> {
             photos,
             videos,
             starred,
+            highlights,
         } => {
             let kind = match (photos, videos) {
                 (true, _) => Kind::Photos,
@@ -698,7 +738,11 @@ fn run() -> Result<(), String> {
                 dump.as_ref(),
                 all,
                 page_size,
-                (kind, starred),
+                LsFilter {
+                    kind,
+                    starred,
+                    highlights,
+                },
                 cli.verbose,
             )
         }
@@ -730,6 +774,7 @@ fn run() -> Result<(), String> {
             storage,
         } => thumb_cmd(&path, &out, &ip, port, storage, cli.verbose),
         Cmd::SyncTime { ip, port } => sync_time_cmd(&ip, port, cli.verbose),
+        Cmd::Marks { path, ip, port } => marks_cmd(&path, &ip, port, cli.verbose),
         Cmd::Rm {
             paths,
             yes,
@@ -771,7 +816,8 @@ fn run() -> Result<(), String> {
                 | Cmd::Thumb { .. }
                 | Cmd::Star { .. }
                 | Cmd::Rm { .. }
-                | Cmd::SyncTime { .. } => {
+                | Cmd::SyncTime { .. }
+                | Cmd::Marks { .. } => {
                     unreachable!("handled above")
                 }
             }

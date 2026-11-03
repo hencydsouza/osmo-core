@@ -214,6 +214,18 @@ pub fn resolve_requested<'a>(
     (found, missing)
 }
 
+/// One mark per line as `m:ss.mmm`, or a note that there are none.
+pub fn format_marks(marks: &[u32]) -> String {
+    if marks.is_empty() {
+        return "no highlight marks".to_string();
+    }
+    marks
+        .iter()
+        .map(|ms| format!("{}:{:02}.{:03}", ms / 60_000, ms / 1000 % 60, ms % 1000))
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Kind {
     All,
@@ -710,5 +722,11 @@ mod tests {
             names(filter_files(&files, Kind::Videos, true)),
             ["B_0002_D.MP4"]
         );
+    }
+
+    #[test]
+    fn format_marks_prints_minutes_seconds_millis_or_none() {
+        assert_eq!(format_marks(&[4000, 65_250]), "0:04.000\n1:05.250");
+        assert_eq!(format_marks(&[]), "no highlight marks");
     }
 }

@@ -7,7 +7,10 @@ use super::paging::{
 };
 use super::stream::{chunk_tally, count_media_paths, manifest_bytes, streams_ended};
 use super::transport::{Datagram, Transport, UdpPeer};
-use super::writes::{delete_payload, favourite_payload, set_time_payload, WriteError};
+use super::writes::{
+    delete_payload, favourite_payload, highlight_payload, parse_highlights, set_time_payload,
+    WriteError,
+};
 use crate::duml::commands::{set_pairing_pin, APP_DEVICE_INFO, DEFAULT_IDENTIFIER};
 use crate::duml::{find_reply, scan_frames};
 use crate::media::CameraFile;
@@ -74,12 +77,13 @@ fn subscription(name: &str, id: u32) -> Vec<u8> {
 }
 
 /// `0x00/0x26` media-list query: counter at byte 4, cursor at 10..14 (top bit selects the store), page size at 14.
-fn list_cmd(ctr: u8, cursor: u32, page_size: u8) -> Vec<u8> {
+fn list_cmd(ctr: u8, cursor: u32, page_size: u8, highlights_only: bool) -> Vec<u8> {
     let mut c =
         hex("4a002a10010000000000010000002d000d0100ffffffffffffffff000100000000000000000000000000");
     c[4] = ctr;
     c[10..14].copy_from_slice(&cursor.to_le_bytes());
     c[14] = page_size;
+    c[37] = if highlights_only { 0x02 } else { 0x00 };
     c
 }
 
@@ -232,6 +236,7 @@ pub struct CameraSession<D: Datagram> {
     logger: Option<Logger>,
     status: Status,
     page_size: u8,
+    highlights_only: bool,
     sd_cursor: u32,
     internal_cursor: u32,
     seen: HashSet<(u8, String)>,
@@ -274,6 +279,7 @@ impl<D: Datagram> CameraSession<D> {
             logger: None,
             status: Status::default(),
             page_size: DEFAULT_PAGE_SIZE,
+            highlights_only: false,
             sd_cursor: NEWEST_SD,
             internal_cursor: NEWEST_INTERNAL,
             seen: HashSet::new(),
@@ -300,6 +306,12 @@ impl<D: Datagram> CameraSession<D> {
     /// small card.
     pub fn set_page_size(&mut self, n: u8) {
         self.page_size = n.max(1);
+    }
+
+    /// Ask the camera to list only the clips that carry highlight marks (query byte 37 = 2). The filter runs on the
+    /// camera, across the whole store, not over the newest page.
+    pub fn set_highlights_only(&mut self, on: bool) {
+        self.highlights_only = on;
     }
 
     /// Is there probably an older page? Meaningful after `list_newest`.
@@ -529,7 +541,13 @@ impl<D: Datagram> CameraSession<D> {
     ) -> Vec<CameraFile> {
         let mut blob = Vec::new();
         let ps = self.page_size;
-        self.send(0x00, 0x26, &list_cmd(SD_CTR, sd_cursor, ps), 0x01, 0);
+        self.send(
+            0x00,
+            0x26,
+            &list_cmd(SD_CTR, sd_cursor, ps, self.highlights_only),
+            0x01,
+            0,
+        );
         let (mut last, mut stable) = (None::<usize>, 0);
         for batch in 0..self.timing.max_batches {
             self.collect(&mut blob, wait);
@@ -540,7 +558,7 @@ impl<D: Datagram> CameraSession<D> {
                 self.send(
                     0x00,
                     0x26,
-                    &list_cmd(INTERNAL_CTR, internal_cursor, ps),
+                    &list_cmd(INTERNAL_CTR, internal_cursor, ps, self.highlights_only),
                     0x01,
                     0,
                 );
@@ -612,7 +630,13 @@ impl<D: Datagram> CameraSession<D> {
         }
         self.log("list: SD answered empty, asking once more (it may not have been mounted yet)");
         let ps = self.page_size;
-        self.send(0x00, 0x26, &list_cmd(SD_CTR, sd_cursor, ps), 0x01, 0);
+        self.send(
+            0x00,
+            0x26,
+            &list_cmd(SD_CTR, sd_cursor, ps, self.highlights_only),
+            0x01,
+            0,
+        );
         for batch in 0..6 {
             self.collect(blob, self.timing.retry_batch);
             if batch == 1 {
@@ -672,24 +696,49 @@ impl<D: Datagram> CameraSession<D> {
     /// Wait for the camera's reply to a write on `set/cmd`: status 0 is success, anything else a refusal, and
     /// silence is `NoReply` (never success).
     fn write_reply(&mut self, set: u8, cmd: u8, wait: Duration) -> Result<(), WriteError> {
+        let r = self
+            .await_reply(set, cmd, wait)
+            .ok_or(WriteError::NoReply)?;
+        let status = if r.len() >= 2 {
+            u16::from_le_bytes([r[0], r[1]])
+        } else {
+            r[0] as u16
+        };
+        if status == 0 {
+            Ok(())
+        } else {
+            Err(WriteError::Rejected(status))
+        }
+    }
+
+    /// The first non-empty reply payload to `set/cmd` within `wait`, acknowledging as it waits.
+    fn await_reply(&mut self, set: u8, cmd: u8, wait: Duration) -> Option<Vec<u8>> {
         let end = Instant::now() + wait;
         while Instant::now() < end {
             let dg = self.recv(self.timing.poll);
             if let Some(r) = find_reply(&dg, set, cmd) {
-                let status = if r.len() >= 2 {
-                    u16::from_le_bytes([r[0], r[1]])
-                } else {
-                    r[0] as u16
-                };
-                return if status == 0 {
-                    Ok(())
-                } else {
-                    Err(WriteError::Rejected(status))
-                };
+                return Some(r);
             }
             self.tx.send_ack();
         }
-        Err(WriteError::NoReply)
+        None
+    }
+
+    /// A video's highlight marks in ms (`0x02/0xFF`, read-only), addressed by its manifest handle. Needs playback
+    /// held, like every per-file command. An empty list means the clip has no marks.
+    pub fn highlights(&mut self, file: &CameraFile) -> Result<Vec<u32>, WriteError> {
+        if file.handle == 0 {
+            return Err(WriteError::NoHandle);
+        }
+        self.write_guard()?;
+        self.send(0x02, 0xFF, &highlight_payload(file.handle), 0x01, 0);
+        self.log(format!("read: highlights 0x{:08x}", file.handle));
+        let reply = self
+            .await_reply(0x02, 0xFF, self.timing.write_reply_wait)
+            .ok_or(WriteError::NoReply)?;
+        let marks = parse_highlights(&reply);
+        self.log(format!("read: highlights reply {marks:?}"));
+        marks
     }
 
     /// Favourite or un-favourite a file (`0x02/0xBF`, addressed by its command handle). Must follow a listing on
