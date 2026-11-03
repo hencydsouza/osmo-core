@@ -15,6 +15,7 @@ use osmo_core::embedded_jpeg::{embedded_jpeg, image_kind, HEAD_BYTES};
 use osmo_core::http::{HttpClient, Outcome};
 use osmo_core::media::url_path;
 use osmo_core::media::CameraFile;
+use std::ffi::OsString;
 use std::net::{IpAddr, UdpSocket};
 use std::path::PathBuf;
 use std::process::ExitCode;
@@ -37,6 +38,15 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Cmd {
+    /// Run an osmo command on camera Wi-Fi, then reconnect (macOS).
+    WithWifi {
+        /// Network to return to if macOS hides the current SSID. Can also use OSMO_RETURN_TO.
+        #[arg(long)]
+        return_to: Option<String>,
+        /// osmo arguments after --, e.g. `-- -v ls`.
+        #[arg(last = true, required = true)]
+        args: Vec<OsString>,
+    },
     /// Scan for cameras over Bluetooth.
     Scan {
         #[arg(long, default_value_t = 8)]
@@ -737,6 +747,10 @@ fn pair_cmd(
 fn run() -> Result<(), String> {
     let cli = Cli::parse();
     match cli.cmd {
+        Cmd::WithWifi { return_to, args } => {
+            let target = return_to.or_else(|| std::env::var("OSMO_RETURN_TO").ok());
+            osmo_cli::wifi::run(target.as_deref(), &args)
+        }
         Cmd::Ls {
             ip,
             port,
@@ -840,7 +854,8 @@ fn run() -> Result<(), String> {
                 | Cmd::Rm { .. }
                 | Cmd::SyncTime { .. }
                 | Cmd::Marks { .. }
-                | Cmd::Burst { .. } => {
+                | Cmd::Burst { .. }
+                | Cmd::WithWifi { .. } => {
                     unreachable!("handled above")
                 }
             }
