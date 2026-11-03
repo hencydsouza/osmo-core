@@ -8,4 +8,7 @@ pub use advert::{decode_advert, is_dji_company_id, model_name, Advert};
 pub use link::{BleLink, LinkError};
 pub use model::{resolve_model, CameraModel};
 pub use reassembler::Reassembler;
-pub use session::{pair_and_read_wifi, PairError, PairOptions, WifiCreds};
+pub use session::{
+    pair_and_read_wifi, start_livestream, start_livestream_cancellable, LiveStream, PairError,
+    PairOptions, StreamConfig, StreamError, WifiCreds,
+};

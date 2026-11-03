@@ -35,6 +35,7 @@ osmo ls --photos|--videos      # only photos or only videos; --starred for favou
 osmo thumb <path> -o t.jpg    # the camera's thumbnail
 osmo marks <video-path>        # highlight marks (moments tagged while recording), as m:ss.mmm
 osmo burst <group-lead-path>   # list burst/interval frames; not yet verified on an Action 4
+osmo stream                   # send RTMP from the camera; configured in .env, Ctrl-C requests stop
 osmo star <path>              # favourite a file (--off does NOT work on an Action 4)
 osmo rm <path>                # dry run: shows what would be deleted
 osmo rm <path> --yes          # really delete (cannot be undone)
@@ -85,6 +86,22 @@ is gitignored and stores the home password in plaintext, so restrict file access
 macOS `networksetup`, where other local processes can briefly see them. The helper currently expects the Action 4's
 `192.168.2.x` network. If macOS hides network names, it cannot verify the final reconnection; check the Wi-Fi menu
 if needed.
+
+### RTMP livestream
+
+Set `OSMO_RTMP_URL` in `.env` to your RTMP server's destination. The camera joins the network named by
+`OSMO_RETURN_TO` using `OSMO_HOME_WIFI_PASSWORD`; alternatively set `OSMO_RTMP_SSID` and
+`OSMO_RTMP_WIFI_PASSWORD` for a different network. The URL may contain a private stream key; keep `.env` private.
+The camera must be able to reach the server on that network.
+
+```sh
+./target/debug/osmo stream --resolution 1080p --bitrate 6000
+```
+
+Run this command directly, rather than through `with-wifi`. Press Ctrl-C to send the camera's stop command;
+check the camera or server to confirm it stopped. Streaming takes the camera off its own hotspot, so media browsing
+may require waking the hotspot again. Osmosis has tested the protocol on an Action 4; this Rust implementation has
+only been tested with simulated BLE replies. The visual effect of stabilization is unverified.
 
 ## Develop
 

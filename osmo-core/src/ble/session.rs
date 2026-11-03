@@ -5,6 +5,7 @@
 use super::link::{BleLink, LinkError};
 use super::reassembler::Reassembler;
 use crate::duml::commands::*;
+use crate::duml::rtmp;
 use crate::duml::Frame;
 use std::collections::VecDeque;
 use std::time::{Duration, Instant};
@@ -45,6 +46,8 @@ impl Default for PairOptions {
 
 #[derive(Debug, Error)]
 pub enum PairError {
+    #[error("operation interrupted")]
+    Cancelled,
     #[error("pairing was not approved on the camera")]
     NotApproved,
     #[error("no reply from the camera to {0}")]
@@ -63,9 +66,43 @@ struct Session<'a> {
     last_write: Option<Instant>,
     last_keepalive: Instant,
     next_id: u16,
+    battery: Option<u8>,
 }
 
 impl<'a> Session<'a> {
+    fn new(link: &'a mut dyn BleLink, opts: &'a PairOptions) -> Self {
+        Self {
+            link,
+            opts,
+            reasm: Reassembler::default(),
+            pending: VecDeque::new(),
+            approved: false,
+            woken: false,
+            last_write: None,
+            last_keepalive: Instant::now(),
+            next_id: 0xA000,
+            battery: None,
+        }
+    }
+
+    fn wake_and_pair(
+        &mut self,
+        on_step: &mut dyn FnMut(&str),
+        cancelled: &dyn Fn() -> bool,
+    ) -> Result<(), PairError> {
+        if cancelled() {
+            return Err(PairError::Cancelled);
+        }
+        on_step("Waking the camera");
+        let id = self.id();
+        self.write(&session_ping(&SESSION_WAKE, id))?;
+        self.woken = true;
+        self.last_keepalive = Instant::now();
+        on_step("Pairing");
+        self.pair(on_step, cancelled)?;
+        self.keepalive()
+    }
+
     fn id(&mut self) -> u16 {
         let id = self.next_id;
         self.next_id = self.next_id.wrapping_add(1);
@@ -92,12 +129,12 @@ impl<'a> Session<'a> {
     }
 
     /// Receive for up to `wait`, answering the camera's own requests and queueing replies.
-    fn pump(&mut self, wait: Duration) -> Result<(), PairError> {
+    fn pump(&mut self, wait: Duration) -> Result<bool, PairError> {
         if self.woken && self.last_keepalive.elapsed() >= self.opts.keepalive_interval {
             self.keepalive()?;
         }
         let Some(frag) = self.link.recv(wait.min(Duration::from_millis(50)))? else {
-            return Ok(());
+            return Ok(false);
         };
         for f in self.reasm.feed(&frag) {
             if f.flags() == 0x40 {
@@ -117,11 +154,20 @@ impl<'a> Session<'a> {
                 if f.cmd_set() == 0x07 && f.cmd_id() == 0x46 {
                     self.approved = true;
                 }
-            } else if !(f.cmd_set() == 0x0D && f.cmd_id() == 0x02) {
+            } else if f.cmd_set() == 0x0D && f.cmd_id() == 0x02 {
+                let pct = if f.payload.len() >= 21 {
+                    f.payload.get(20)
+                } else {
+                    f.payload.get(12)
+                };
+                if let Some(&pct) = pct.filter(|&&v| v <= 100) {
+                    self.battery = Some(pct);
+                }
+            } else {
                 self.pending.push_back(f);
             }
         }
-        Ok(())
+        Ok(true)
     }
 
     fn take_reply(&mut self, set: u8, cmd: u8) -> Option<Frame> {
@@ -151,16 +197,26 @@ impl<'a> Session<'a> {
         }
     }
 
-    fn pair(&mut self, on_step: &mut dyn FnMut(&str)) -> Result<(), PairError> {
+    fn pair(
+        &mut self,
+        on_step: &mut dyn FnMut(&str),
+        cancelled: &dyn Fn() -> bool,
+    ) -> Result<(), PairError> {
         let deadline = Instant::now() + self.opts.approve_timeout;
         let (mut got_reply, mut prompted) = (false, false);
         loop {
+            if cancelled() {
+                return Err(PairError::Cancelled);
+            }
             self.pending.clear();
             let id = self.id();
             let frame = set_pairing_pin(&self.opts.pin, &self.opts.identifier, id);
             self.write(&frame)?;
             let step_end = Instant::now() + self.opts.step_timeout;
             while Instant::now() < step_end && !self.approved {
+                if cancelled() {
+                    return Err(PairError::Cancelled);
+                }
                 if let Some(f) = self.take_reply(0x07, 0x45) {
                     got_reply = true;
                     match f.payload.get(1) {
@@ -218,26 +274,8 @@ pub fn pair_and_read_wifi(
     opts: &PairOptions,
     on_step: &mut dyn FnMut(&str),
 ) -> Result<WifiCreds, PairError> {
-    let mut s = Session {
-        link,
-        opts,
-        reasm: Reassembler::default(),
-        pending: VecDeque::new(),
-        approved: false,
-        woken: false,
-        last_write: None,
-        last_keepalive: Instant::now(),
-        next_id: 0xA000,
-    };
-    on_step("Waking the camera");
-    let id = s.id();
-    s.write(&session_ping(&SESSION_WAKE, id))?;
-    s.woken = true;
-    s.last_keepalive = Instant::now();
-
-    on_step("Pairing");
-    s.pair(on_step)?;
-    s.keepalive()?;
+    let mut s = Session::new(link, opts);
+    s.wake_and_pair(on_step, &|| false)?;
     // `0x53/0x10` (to type 0x1C, not the camera) is what actually wakes a sleeping camera and brings its
     // WiFi AP up; the camera answers `01 00 00 00`. Fire and forget, as Osmosis does.
     let id = s.id();
@@ -260,6 +298,261 @@ pub fn pair_and_read_wifi(
         ssid,
         password,
         mac,
+    })
+}
+
+/// Livestream configuration. Keep the URL and Wi-Fi password private; both may contain secrets.
+pub struct StreamConfig<'a> {
+    pub ssid: &'a str,
+    pub password: &'a str,
+    pub url: &'a str,
+    /// 0x47 = 480p, 0x04 = 720p, 0x0a = 1080p.
+    pub resolution: u8,
+    pub bitrate_kbps: u16,
+    /// 0x02 = 25 fps, 0x03 = 30 fps.
+    pub fps: u8,
+    /// Action 4/5 Pro stabilization setting 0–4; `None` skips the command.
+    pub stabilization: Option<u8>,
+    pub action5_pro: bool,
+}
+
+#[derive(Debug, Error)]
+pub enum StreamError {
+    #[error("operation interrupted")]
+    Cancelled,
+    #[error(transparent)]
+    Pair(#[from] PairError),
+    #[error(transparent)]
+    Build(#[from] rtmp::BuildError),
+    #[error("invalid livestream setting: {0}")]
+    Invalid(&'static str),
+    #[error("no camera reply to {0}")]
+    NoReply(&'static str),
+    #[error("camera rejected {step} (status 0x{status:02x})")]
+    Rejected { step: &'static str, status: u8 },
+}
+
+fn stream_request(
+    s: &mut Session<'_>,
+    frame: &[u8],
+    set: u8,
+    cmd: u8,
+    step: &'static str,
+    attempts: usize,
+    cancelled: &dyn Fn() -> bool,
+) -> Result<Frame, StreamError> {
+    for _ in 0..attempts {
+        if cancelled() {
+            return Err(StreamError::Cancelled);
+        }
+        // Discard previously queued replies before a new request: several stream steps share 0x02/0x8e.
+        for _ in 0..64 {
+            if !s.pump(Duration::ZERO)? {
+                break;
+            }
+        }
+        s.pending.clear();
+        s.write(frame)?;
+        let end = Instant::now() + s.opts.step_timeout;
+        loop {
+            if cancelled() {
+                return Err(StreamError::Cancelled);
+            }
+            if let Some(reply) = s.take_reply(set, cmd) {
+                return Ok(reply);
+            }
+            if Instant::now() >= end {
+                break;
+            }
+            s.pump(end.saturating_duration_since(Instant::now()))?;
+        }
+    }
+    Err(StreamError::NoReply(step))
+}
+
+/// An active BLE livestream. Call `poll` regularly to maintain the connection and observe battery pushes.
+/// Dropping it attempts to send stop; a successful send does not prove that the camera stopped.
+pub struct LiveStream<'a> {
+    session: Session<'a>,
+    active: bool,
+}
+
+impl LiveStream<'_> {
+    /// Service keepalives and incoming camera requests for up to `wait`, returning a new battery percentage.
+    pub fn poll(&mut self, wait: Duration) -> Result<Option<u8>, StreamError> {
+        if !self.active {
+            return Err(StreamError::Invalid("stream already stopped"));
+        }
+        if let Some(pct) = self.session.battery.take() {
+            return Ok(Some(pct));
+        }
+        let end = Instant::now() + wait;
+        while Instant::now() < end {
+            self.session
+                .pump(end.saturating_duration_since(Instant::now()))?;
+            if let Some(pct) = self.session.battery.take() {
+                return Ok(Some(pct));
+            }
+        }
+        Ok(None)
+    }
+
+    /// Send the stop frame. The camera does not provide a verified stop acknowledgment here.
+    pub fn stop(&mut self) -> Result<(), StreamError> {
+        if self.active {
+            self.session.write(&rtmp::stop_stream())?;
+            self.active = false;
+        }
+        Ok(())
+    }
+}
+
+impl Drop for LiveStream<'_> {
+    fn drop(&mut self) {
+        let _ = self.stop();
+    }
+}
+
+/// Pair over the already-open BLE link, send stream setup, and retain the link for the stream lifetime.
+/// Fixture-tested; not yet live-verified in osmo-core. Joining the supplied Wi-Fi turns off the camera's AP.
+pub fn start_livestream<'a>(
+    link: &'a mut dyn BleLink,
+    opts: &'a PairOptions,
+    config: &StreamConfig<'_>,
+    on_step: &mut dyn FnMut(&str),
+) -> Result<LiveStream<'a>, StreamError> {
+    start_livestream_cancellable(link, opts, config, on_step, &|| false)
+}
+
+/// Like `start_livestream`, but checks `cancelled` during pairing and between setup requests.
+pub fn start_livestream_cancellable<'a>(
+    link: &'a mut dyn BleLink,
+    opts: &'a PairOptions,
+    config: &StreamConfig<'_>,
+    on_step: &mut dyn FnMut(&str),
+    cancelled: &dyn Fn() -> bool,
+) -> Result<LiveStream<'a>, StreamError> {
+    if config.ssid.is_empty() {
+        return Err(StreamError::Invalid("Wi-Fi SSID is empty"));
+    }
+    if config.url.is_empty() {
+        return Err(StreamError::Invalid("RTMP URL is empty"));
+    }
+    if !matches!(config.resolution, 0x47 | 0x04 | 0x0a) {
+        return Err(StreamError::Invalid("unsupported resolution"));
+    }
+    if !matches!(config.fps, 2 | 3) {
+        return Err(StreamError::Invalid("unsupported frame rate"));
+    }
+    if config.bitrate_kbps == 0 {
+        return Err(StreamError::Invalid("bitrate is zero"));
+    }
+    if config.stabilization.is_some_and(|v| v > 4) {
+        return Err(StreamError::Invalid("unsupported stabilization"));
+    }
+    // Validate length before making any camera changes.
+    let wifi = rtmp::connect_wifi(config.ssid, config.password, 0x8c19)?;
+    let configure = rtmp::configure_stream(
+        config.resolution,
+        config.bitrate_kbps,
+        config.fps,
+        config.url,
+        config.action5_pro,
+    )?;
+    let mut s = Session::new(link, opts);
+    s.wake_and_pair(on_step, cancelled)?;
+    on_step("Preparing stream");
+    let reply = stream_request(
+        &mut s,
+        &rtmp::prepare_stage1(),
+        2,
+        0xe1,
+        "prepare stage 1",
+        2,
+        cancelled,
+    )?;
+    match reply.payload.first() {
+        Some(0) => {}
+        Some(&status) => {
+            return Err(StreamError::Rejected {
+                step: "prepare stage 1",
+                status,
+            })
+        }
+        None => return Err(StreamError::Invalid("empty prepare response")),
+    }
+    stream_request(
+        &mut s,
+        &rtmp::prepare_stage2(),
+        2,
+        0x8e,
+        "prepare stage 2",
+        2,
+        cancelled,
+    )?;
+    on_step("Connecting camera to Wi-Fi");
+    let reply = stream_request(&mut s, &wifi, 7, 0x47, "Wi-Fi connection", 3, cancelled)?;
+    if reply.payload.len() < 2 {
+        return Err(StreamError::Invalid("short Wi-Fi response"));
+    }
+    if reply.payload[0] != 0 || reply.payload[1] != 0 {
+        return Err(StreamError::Rejected {
+            step: "Wi-Fi connection",
+            status: if reply.payload[0] != 0 {
+                reply.payload[0]
+            } else {
+                reply.payload[1]
+            },
+        });
+    }
+    if let Some(eis) = config.stabilization {
+        on_step("Setting stabilization");
+        stream_request(
+            &mut s,
+            &rtmp::stabilization(eis, config.action5_pro),
+            2,
+            0x8e,
+            "stabilization",
+            2,
+            cancelled,
+        )?;
+    }
+    on_step("Configuring stream");
+    let reply = stream_request(
+        &mut s,
+        &configure,
+        8,
+        0x78,
+        "stream configuration",
+        2,
+        cancelled,
+    )?;
+    if let Some(&status) = reply.payload.first().filter(|&&v| v != 0) {
+        return Err(StreamError::Rejected {
+            step: "stream configuration",
+            status,
+        });
+    }
+    on_step("Starting stream");
+    if cancelled() {
+        return Err(StreamError::Cancelled);
+    }
+    if let Err(e) = stream_request(
+        &mut s,
+        &rtmp::start_stream(),
+        2,
+        0x8e,
+        "stream start",
+        2,
+        cancelled,
+    ) {
+        // A lost acknowledgement does not prove the camera ignored start.
+        let _ = s.write(&rtmp::stop_stream());
+        return Err(e);
+    }
+    Ok(LiveStream {
+        session: s,
+        active: true,
     })
 }
 

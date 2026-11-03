@@ -16,6 +16,7 @@ clap = { version = "4", features = ["derive"] }
 directories = "5"
 futures = "0.3"
 dotenvy = "0.15.7"
+ctrlc = { version = "3.5", features = ["termination"] }
 
 [target.'cfg(target_os = "macos")'.dependencies]
 libc = "0.2"
