@@ -7,7 +7,10 @@ use super::paging::{
 };
 use super::stream::{chunk_tally, count_media_paths, manifest_bytes, streams_ended};
 use super::transport::{Datagram, Transport, UdpPeer};
-use super::writes::{delete_payload, favourite_payload, set_time_payload, WriteError};
+use super::writes::{
+    delete_payload, favourite_payload, highlight_payload, parse_highlights, set_time_payload,
+    WriteError,
+};
 use crate::duml::commands::{set_pairing_pin, APP_DEVICE_INFO, DEFAULT_IDENTIFIER};
 use crate::duml::{find_reply, scan_frames};
 use crate::media::CameraFile;
@@ -672,24 +675,49 @@ impl<D: Datagram> CameraSession<D> {
     /// Wait for the camera's reply to a write on `set/cmd`: status 0 is success, anything else a refusal, and
     /// silence is `NoReply` (never success).
     fn write_reply(&mut self, set: u8, cmd: u8, wait: Duration) -> Result<(), WriteError> {
+        let r = self
+            .await_reply(set, cmd, wait)
+            .ok_or(WriteError::NoReply)?;
+        let status = if r.len() >= 2 {
+            u16::from_le_bytes([r[0], r[1]])
+        } else {
+            r[0] as u16
+        };
+        if status == 0 {
+            Ok(())
+        } else {
+            Err(WriteError::Rejected(status))
+        }
+    }
+
+    /// The first non-empty reply payload to `set/cmd` within `wait`, acknowledging as it waits.
+    fn await_reply(&mut self, set: u8, cmd: u8, wait: Duration) -> Option<Vec<u8>> {
         let end = Instant::now() + wait;
         while Instant::now() < end {
             let dg = self.recv(self.timing.poll);
             if let Some(r) = find_reply(&dg, set, cmd) {
-                let status = if r.len() >= 2 {
-                    u16::from_le_bytes([r[0], r[1]])
-                } else {
-                    r[0] as u16
-                };
-                return if status == 0 {
-                    Ok(())
-                } else {
-                    Err(WriteError::Rejected(status))
-                };
+                return Some(r);
             }
             self.tx.send_ack();
         }
-        Err(WriteError::NoReply)
+        None
+    }
+
+    /// A video's highlight marks in ms (`0x02/0xFF`, read-only), addressed by its manifest handle. Needs playback
+    /// held, like every per-file command. An empty list means the clip has no marks.
+    pub fn highlights(&mut self, file: &CameraFile) -> Result<Vec<u32>, WriteError> {
+        if file.handle == 0 {
+            return Err(WriteError::NoHandle);
+        }
+        self.write_guard()?;
+        self.send(0x02, 0xFF, &highlight_payload(file.handle), 0x01, 0);
+        self.log(format!("read: highlights 0x{:08x}", file.handle));
+        let reply = self
+            .await_reply(0x02, 0xFF, self.timing.write_reply_wait)
+            .ok_or(WriteError::NoReply)?;
+        let marks = parse_highlights(&reply);
+        self.log(format!("read: highlights reply {marks:?}"));
+        marks
     }
 
     /// Favourite or un-favourite a file (`0x02/0xBF`, addressed by its command handle). Must follow a listing on

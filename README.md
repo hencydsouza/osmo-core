@@ -33,6 +33,7 @@ osmo get <path> <path> ...      # several files in one go: completed ones are sk
 osmo ls --all                 # every file, paged (--page-size N to force small pages)
 osmo ls --photos|--videos      # only photos or only videos; --starred for favourites only (combine with --all)
 osmo thumb <path> -o t.jpg    # the camera's thumbnail
+osmo marks <video-path>        # highlight marks (moments tagged while recording), as m:ss.mmm
 osmo star <path>              # favourite a file (--off does NOT work on an Action 4)
 osmo rm <path>                # dry run: shows what would be deleted
 osmo rm <path> --yes          # really delete (cannot be undone)
