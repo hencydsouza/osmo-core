@@ -34,11 +34,17 @@ osmo ls --all                 # every file, paged (--page-size N to force small 
 osmo ls --photos|--videos      # only photos or only videos; --starred for favourites only (combine with --all)
 osmo thumb <path> -o t.jpg    # the camera's thumbnail
 osmo marks <video-path>        # highlight marks (moments tagged while recording), as m:ss.mmm
+osmo burst <group-lead-path>   # list burst/interval frames; not yet verified on an Action 4
 osmo star <path>              # favourite a file (--off does NOT work on an Action 4)
 osmo rm <path>                # dry run: shows what would be deleted
 osmo rm <path> --yes          # really delete (cannot be undone)
 osmo sync-time                # set the camera's clock and time zone from this computer's
 ```
+
+`ls` marks numbered burst/interval leads with `[burst]`. `burst` requires a fitted command handle and
+reports an error when the reply is incomplete or reaches the 120-frame request limit. Frame handles are
+not exposed for deletion or favourite operations. To download an individual expanded frame, use its printed
+path with `osmo get --storage 0 <path>` for SD (or `--storage 1` for internal storage).
 
 `rm` deletes only exact paths from the newest listing, all or nothing: a typo, glob, or a file without a verified
 handle refuses the whole command and nothing is sent. It confirms on a fresh session that the files are gone
@@ -52,6 +58,33 @@ with no drop (`--no-keepalive` turns it off, and `--storage` skips the datalink 
 `-v` logs every download attempt.
 
 macOS: your terminal needs Bluetooth permission (System Settings > Privacy & Security > Bluetooth).
+
+### macOS Wi-Fi helper
+
+Copy `.env.example` to `.env` and fill in the home network name and password locally. The helper wakes the camera
+and reads its Wi-Fi password over Bluetooth, joins its Wi-Fi, runs an `osmo` command, and attempts to reconnect to
+the home network, including on failure or interruption:
+
+```sh
+./target/debug/osmo with-wifi -- -v ls
+./target/debug/osmo with-wifi -- -v burst 'DCIM/DJI_001/your-burst-lead.JPG'
+```
+
+macOS may hide the current Wi-Fi name from terminal programs. `OSMO_RETURN_TO` in `.env` provides the network to
+return to; it can also be supplied explicitly:
+
+```sh
+./target/debug/osmo with-wifi --return-to 'Your home Wi-Fi' -- -v ls
+# Or set once per shell (add this to ~/.zshrc to keep it):
+export OSMO_RETURN_TO='Your home Wi-Fi'
+./target/debug/osmo with-wifi -- -v ls
+```
+
+The helper reads `.env` from the current working directory; existing environment variables take precedence. `.env`
+is gitignored and stores the home password in plaintext, so restrict file access. Passwords are also passed as arguments to
+macOS `networksetup`, where other local processes can briefly see them. The helper currently expects the Action 4's
+`192.168.2.x` network. If macOS hides network names, it cannot verify the final reconnection; check the Wi-Fi menu
+if needed.
 
 ## Develop
 

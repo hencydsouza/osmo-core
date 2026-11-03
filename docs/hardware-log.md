@@ -156,7 +156,15 @@ multi-attempt download *with* keepalive (no cuts happened in either keepalive ru
 ## Highlight marks on the Action 4 (2026-11-04): camera answers e3
 
 - `osmo -v marks` on `DJI_20261101084646_0008_D.MP4` (handle 0x00040080): the camera replied status `0xe3`.
-- Osmosis's status table: `e3` = "supported, bad/missing parameter" (not `e0`, "not supported"). So the Action 4 implements `0x02/0xFF` but rejected this request: wrong handle form or payload, or simply a clip with no marks. Not yet known which.
-- Next step: `osmo ls --highlights` (camera-side filter, list query byte 37 = 2) shows whether any clip carries marks at all.
+- Osmosis's status table describes `e3` as "supported, bad/missing parameter" (not `e0`, "not supported"). The request was rejected; the cause, including whether this command works on Action 4, remains unknown.
+- `osmo ls --highlights` sends list query byte 37 = 2, intended to filter for marked clips.
 
-- `osmo -v ls --highlights` returned a well-formed empty list (end frame seen): no clip on this card carries marks. That makes the earlier `e3` most likely "this clip has no marks", but a tagged clip is needed to prove it and to test the mark decoder against a real reply.
+- `osmo -v ls --highlights` returned an empty list with an end frame. The filter has not been checked with a known marked clip, so this does not prove the card has no marks or explain `e3`. A known tagged clip is needed to test both filter and decoder.
+
+- macOS Wi-Fi helper: initial attempts without passwords returned "Could not find network" or `-3900` for the Action 4 hotspot and the home network, despite both SSIDs being preferred. The cause is unconfirmed.
+
+## macOS Wi-Fi helper on the Action 4 (2026-11-04)
+
+- `osmo with-wifi -- -v ls` woke the camera over BLE, joined its hotspot, listed 14 files, and requested reconnection to the home network. It retrieved the camera password via BLE and used the locally configured home password.
+- macOS hid the current SSID, so the helper could not verify reconnection by name. Afterward, the Wi-Fi interface's IP address and default gateway matched those observed before switching, consistent with returning to the home network but not conclusive proof of its SSID.
+- No listed file had a burst suffix. Burst expansion still requires a live test with a newly recorded burst.

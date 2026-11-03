@@ -15,6 +15,10 @@ tokio = { version = "1", features = ["rt-multi-thread", "macros", "time"] }
 clap = { version = "4", features = ["derive"] }
 directories = "5"
 futures = "0.3"
+dotenvy = "0.15.7"
+
+[target.'cfg(target_os = "macos")'.dependencies]
+libc = "0.2"
 
 [dev-dependencies]
 tempfile = "3"

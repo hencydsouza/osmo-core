@@ -9,12 +9,13 @@ use osmo_cli::listing::{
 };
 use osmo_cli::listing::{filter_files, format_marks, Kind};
 use osmo_cli::{config, route::route_warning};
-use osmo_core::ble::{model_name, pair_and_read_wifi, PairOptions};
+use osmo_core::ble::{model_name, pair_and_read_wifi, PairOptions, WifiCreds};
 use osmo_core::datalink::{has_media_records, CameraSession, SessionConfig, SessionError};
 use osmo_core::embedded_jpeg::{embedded_jpeg, image_kind, HEAD_BYTES};
 use osmo_core::http::{HttpClient, Outcome};
 use osmo_core::media::url_path;
 use osmo_core::media::CameraFile;
+use std::ffi::OsString;
 use std::net::{IpAddr, UdpSocket};
 use std::path::PathBuf;
 use std::process::ExitCode;
@@ -37,6 +38,15 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Cmd {
+    /// Run an osmo command on camera Wi-Fi, then reconnect (macOS).
+    WithWifi {
+        /// Network to return to if macOS hides the current SSID. Can also use OSMO_RETURN_TO.
+        #[arg(long)]
+        return_to: Option<String>,
+        /// osmo arguments after --, e.g. `-- -v ls`.
+        #[arg(last = true, required = true)]
+        args: Vec<OsString>,
+    },
     /// Scan for cameras over Bluetooth.
     Scan {
         #[arg(long, default_value_t = 8)]
@@ -82,8 +92,17 @@ enum Cmd {
         highlights: bool,
     },
     /// Show a video's highlight marks (the moments tagged while recording). PATH is as `osmo ls` prints it.
-    /// UNVERIFIED on an Action 4: a clip without marks gets 'bad parameter' (0xe3), and no clip here has marks.
+    /// UNVERIFIED on an Action 4: the tested clip returned 'bad parameter' (0xe3); its cause is unknown.
     Marks {
+        path: String,
+        #[arg(long, default_value = CAMERA_IP)]
+        ip: String,
+        #[arg(long, default_value_t = 9004)]
+        port: u16,
+    },
+    /// List the frames of a burst or interval group. Not yet verified on an Action 4.
+    Burst {
+        /// The group lead path as printed by `osmo ls`.
         path: String,
         #[arg(long, default_value = CAMERA_IP)]
         ip: String,
@@ -374,6 +393,18 @@ fn marks_cmd(path: &str, ip: &str, port: u16, verbose: bool) -> Result<(), Strin
     }
     let marks = sess.highlights(&file).map_err(|e| e.to_string())?;
     println!("{}", format_marks(&marks));
+    Ok(())
+}
+
+fn burst_cmd(path: &str, ip: &str, port: u16, verbose: bool) -> Result<(), String> {
+    let path = validate_get_path(path)?;
+    let mut sess = open_session(ip, port, verbose)?;
+    eprintln!("Looking up {path} ...");
+    let file = sess.find_file(path).map_err(session_err)?.ok_or(
+        "not found anywhere in the camera's library: check the path against `osmo ls --all`",
+    )?;
+    let files = sess.expand_burst_group(&file).map_err(session_err)?;
+    println!("{}", format_listing(&files));
     Ok(())
 }
 
@@ -679,12 +710,11 @@ fn get_cmd(paths: &[String], out: &PathBuf, opts: GetOpts) -> Result<(), String>
     Ok(())
 }
 
-fn pair_cmd(
+fn camera_wifi_creds(
     rt: &Arc<Runtime>,
     adapter: &btleplug::platform::Adapter,
     device: Option<String>,
-    show: bool,
-) -> Result<(), String> {
+) -> Result<WifiCreds, String> {
     let wanted = device.or_else(config::last_device);
     let (cams, _) = ble_btleplug::scan(rt, adapter, 6)?;
     let cam = ble_btleplug::pick(cams, wanted.as_deref())
@@ -701,6 +731,22 @@ fn pair_cmd(
     let creds = pair_and_read_wifi(&mut link, &opts, &mut |s| eprintln!("{s}..."))
         .map_err(|e| e.to_string())?;
     let _ = config::save_last_device(&cam.id);
+    Ok(creds)
+}
+
+fn wake_camera_for_wifi() -> Result<WifiCreds, String> {
+    let rt = Arc::new(Runtime::new().map_err(|e| e.to_string())?);
+    let adapter = ble_btleplug::adapter(&rt)?;
+    camera_wifi_creds(&rt, &adapter, None)
+}
+
+fn pair_cmd(
+    rt: &Arc<Runtime>,
+    adapter: &btleplug::platform::Adapter,
+    device: Option<String>,
+    show: bool,
+) -> Result<(), String> {
+    let creds = camera_wifi_creds(rt, adapter, device)?;
     println!("SSID: {}", creds.ssid);
     if show {
         match creds.password {
@@ -716,6 +762,9 @@ fn pair_cmd(
 fn run() -> Result<(), String> {
     let cli = Cli::parse();
     match cli.cmd {
+        Cmd::WithWifi { return_to, args } => {
+            osmo_cli::wifi::run(return_to.as_deref(), &args, wake_camera_for_wifi)
+        }
         Cmd::Ls {
             ip,
             port,
@@ -775,6 +824,7 @@ fn run() -> Result<(), String> {
         } => thumb_cmd(&path, &out, &ip, port, storage, cli.verbose),
         Cmd::SyncTime { ip, port } => sync_time_cmd(&ip, port, cli.verbose),
         Cmd::Marks { path, ip, port } => marks_cmd(&path, &ip, port, cli.verbose),
+        Cmd::Burst { path, ip, port } => burst_cmd(&path, &ip, port, cli.verbose),
         Cmd::Rm {
             paths,
             yes,
@@ -817,7 +867,9 @@ fn run() -> Result<(), String> {
                 | Cmd::Star { .. }
                 | Cmd::Rm { .. }
                 | Cmd::SyncTime { .. }
-                | Cmd::Marks { .. } => {
+                | Cmd::Marks { .. }
+                | Cmd::Burst { .. }
+                | Cmd::WithWifi { .. } => {
                     unreachable!("handled above")
                 }
             }

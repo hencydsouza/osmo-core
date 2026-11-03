@@ -232,6 +232,94 @@ fn duml(log: &Log) -> Vec<(u8, u8, Vec<u8>)> {
 
 const TRIGGER: [u8; 14] = [0x4a, 0x04, 0x0e, 0x10, 0x01, 0, 0, 0, 0, 0, 0x01, 0, 0, 0];
 
+fn group_manifest(paths: &[&str]) -> Vec<u8> {
+    let mut out = (paths.len() as u32).to_le_bytes().to_vec();
+    for path in paths {
+        let name = path.rsplit('/').next().unwrap();
+        let stem = path.strip_suffix(".JPG").unwrap();
+        out.extend([0x0d, name.len() as u8]);
+        out.extend(name.as_bytes());
+        out.extend([0x1a, (stem.len() + 6) as u8, 0, 0, 0, 1]);
+        out.extend(stem.as_bytes());
+    }
+    out
+}
+
+#[test]
+fn expands_a_group_in_order_and_keeps_the_leads_storage() {
+    let paths = [
+        "DCIM/DJI_001/SHOT_D_003.JPG",
+        "DCIM/DJI_001/SHOT_D_001.JPG",
+        "DCIM/DJI_001/SHOT_D_EXTRA_002.JPG",
+        "DCIM/DJI_002/SHOT_D_002.JPG",
+        "DCIM/DJI_001/SHOT_D_002.JPG",
+    ];
+    let frames = manifest_frames(&group_manifest(&paths), 1);
+    let listing = manifest_frames(&fixture("oa4_45.bin"), 1);
+    let (cam, log) = FakeCamera::new(Box::new(move |ctr, n| match (ctr, n) {
+        (1, 0) => listing.clone(),
+        (1, 1) => frames.clone(),
+        _ => vec![],
+    }));
+    let mut sess = session(cam);
+    sess.list_newest().unwrap();
+    let mut lead = decode_manifest(&fixture("oa4_45.bin")).remove(0);
+    lead.path = paths[1].into();
+    lead.name = "SHOT_D_001.JPG".into();
+    lead.storage = 1;
+    lead.cmd_handle = 0x40123456;
+    let files = sess.expand_burst_group(&lead).unwrap();
+    assert_eq!(
+        files.iter().map(|f| f.path.as_str()).collect::<Vec<_>>(),
+        vec![paths[1], paths[4], paths[0]]
+    );
+    assert!(files.iter().all(|f| f.storage == 1));
+    assert!(files.iter().all(|f| !f.deletable() && f.cmd_handle == 0));
+    let requests = duml(&log);
+    let query = requests
+        .iter()
+        .find(|(set, cmd, p)| *set == 0 && *cmd == 0x26 && p.len() > 20 && p[16] == 0x10)
+        .unwrap();
+    assert_eq!(&query.2[10..14], &0x40123456u32.to_le_bytes());
+    assert_eq!(query.2[14], 120);
+    assert_eq!(query.2[39], 1);
+}
+
+#[test]
+fn burst_expansion_does_not_treat_silence_as_a_complete_group() {
+    let (cam, _) = FakeCamera::new(Box::new(|_, _| vec![]));
+    let mut sess = session(cam);
+    sess.list_newest().unwrap();
+    let mut lead = decode_manifest(&fixture("oa4_45.bin")).remove(0);
+    lead.path = "DCIM/DJI_001/SHOT_D_001.JPG".into();
+    lead.name = "SHOT_D_001.JPG".into();
+    lead.cmd_handle = 0x40010;
+    assert!(sess.expand_burst_group(&lead).is_err());
+}
+
+#[test]
+fn burst_expansion_rejects_a_reply_with_missing_records() {
+    let mut manifest = group_manifest(&["DCIM/DJI_001/SHOT_D_001.JPG"]);
+    manifest[..4].copy_from_slice(&3u32.to_le_bytes());
+    let group = manifest_frames(&manifest, 1);
+    let listing = manifest_frames(&fixture("oa4_45.bin"), 1);
+    let (cam, _) = FakeCamera::new(Box::new(move |ctr, n| match (ctr, n) {
+        (1, 0) => listing.clone(),
+        (1, 1) => group.clone(),
+        _ => vec![],
+    }));
+    let mut sess = session(cam);
+    sess.list_newest().unwrap();
+    let mut lead = decode_manifest(&fixture("oa4_45.bin")).remove(0);
+    lead.path = "DCIM/DJI_001/SHOT_D_001.JPG".into();
+    lead.name = "SHOT_D_001.JPG".into();
+    lead.cmd_handle = 0x40010;
+    assert!(matches!(
+        sess.expand_burst_group(&lead),
+        Err(SessionError::IncompleteGroup)
+    ));
+}
+
 #[test]
 fn lists_oa4_newest_page_from_fixture_in_the_documented_order() {
     let frames = manifest_frames(&fixture("oa4_45.bin"), 1);

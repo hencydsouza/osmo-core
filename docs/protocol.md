@@ -52,5 +52,6 @@ BLE pair -> read WiFi credentials -> (user joins the camera's WiFi) -> TCP-7001 
 
 ## Not implemented (by design, for now)
 
-Time sync, un-favourite on the Action 4, burst/highlights, trimmed download, RTMP livestream, GPS sync, drones,
+Time sync and un-favourite remain unverified or non-working on the Action 4; burst and highlights are ported but
+not yet verified with a real burst or marked video. Not implemented: trimmed download, RTMP livestream, GPS sync, drones,
 delete of files older than the newest page, Xtra rebadges, auto WiFi join.
