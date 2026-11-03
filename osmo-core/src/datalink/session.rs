@@ -631,8 +631,8 @@ impl<D: Datagram> CameraSession<D> {
     }
 
     /// Continue the write counter sequence from an earlier process. Every write carries a per-request counter, and
-    /// the camera treats a repeated one as a repeat: it acknowledges and does nothing (an un-favourite right
-    /// after a favourite, both with counter 1, was ignored on a real Action 4). One sequence is shared by every
+    /// Osmosis restarts its counters at 1 per session, so a repeated value is probably harmless; a continued
+    /// sequence is kept anyway (unproven either way). One sequence is shared by every
     /// kind of write; a caller that makes one session per run must persist `next_write_counter()` and pass it
     /// here next time, starting above anything it used before.
     pub fn set_write_counter_start(&mut self, n: u32) {

@@ -128,3 +128,11 @@ multi-attempt download *with* keepalive (no cuts happened in either keepalive ru
   (acknowledge, do nothing); Osmosis's own tests note the counter "has to advance". The same bug would have made
   every delete after the first silently do nothing. Fixed test-first: one shared write counter, persisted by the
   CLI and seeded from the clock so it cannot collide with counters used earlier. Not yet re-verified live.
+
+## HW-C follow-up (2026-11-03): un-favourite ignored, counter theory not confirmed
+
+- Star ON works on a fresh file (0009) with a large clock-seeded counter; a fresh listing and `ls` show the star.
+- Star OFF is acknowledged (status 0) but the camera keeps the heart, confirmed on the camera's own screen.
+  It failed with counter 1 (separate process) and with the clock-seeded counter, so the counter is not the cause.
+- Osmosis restarts counters at 1 per session and only unit-tests the off payload; un-favourite was never hardware-verified.
+- Open: the correct un-favourite encoding for the Action 4. Delete not started.
