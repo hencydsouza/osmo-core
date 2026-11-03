@@ -9,7 +9,7 @@ use osmo_cli::listing::{
 };
 use osmo_cli::listing::{filter_files, format_marks, Kind};
 use osmo_cli::{config, route::route_warning};
-use osmo_core::ble::{model_name, pair_and_read_wifi, PairOptions};
+use osmo_core::ble::{model_name, pair_and_read_wifi, PairOptions, WifiCreds};
 use osmo_core::datalink::{has_media_records, CameraSession, SessionConfig, SessionError};
 use osmo_core::embedded_jpeg::{embedded_jpeg, image_kind, HEAD_BYTES};
 use osmo_core::http::{HttpClient, Outcome};
@@ -710,12 +710,11 @@ fn get_cmd(paths: &[String], out: &PathBuf, opts: GetOpts) -> Result<(), String>
     Ok(())
 }
 
-fn pair_cmd(
+fn camera_wifi_creds(
     rt: &Arc<Runtime>,
     adapter: &btleplug::platform::Adapter,
     device: Option<String>,
-    show: bool,
-) -> Result<(), String> {
+) -> Result<WifiCreds, String> {
     let wanted = device.or_else(config::last_device);
     let (cams, _) = ble_btleplug::scan(rt, adapter, 6)?;
     let cam = ble_btleplug::pick(cams, wanted.as_deref())
@@ -732,6 +731,22 @@ fn pair_cmd(
     let creds = pair_and_read_wifi(&mut link, &opts, &mut |s| eprintln!("{s}..."))
         .map_err(|e| e.to_string())?;
     let _ = config::save_last_device(&cam.id);
+    Ok(creds)
+}
+
+fn wake_camera_for_wifi() -> Result<WifiCreds, String> {
+    let rt = Arc::new(Runtime::new().map_err(|e| e.to_string())?);
+    let adapter = ble_btleplug::adapter(&rt)?;
+    camera_wifi_creds(&rt, &adapter, None)
+}
+
+fn pair_cmd(
+    rt: &Arc<Runtime>,
+    adapter: &btleplug::platform::Adapter,
+    device: Option<String>,
+    show: bool,
+) -> Result<(), String> {
+    let creds = camera_wifi_creds(rt, adapter, device)?;
     println!("SSID: {}", creds.ssid);
     if show {
         match creds.password {
@@ -747,7 +762,9 @@ fn pair_cmd(
 fn run() -> Result<(), String> {
     let cli = Cli::parse();
     match cli.cmd {
-        Cmd::WithWifi { return_to, args } => osmo_cli::wifi::run(return_to.as_deref(), &args),
+        Cmd::WithWifi { return_to, args } => {
+            osmo_cli::wifi::run(return_to.as_deref(), &args, wake_camera_for_wifi)
+        }
         Cmd::Ls {
             ip,
             port,
