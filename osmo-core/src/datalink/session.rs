@@ -1,7 +1,6 @@
 //! Camera media session over the DUML datalink: handshake, registration, playback mode and the
-//! newest-page file list. Ported from Osmosis `DumlSession.kt` / `CameraSession.kt` for the Action 4
-//! path (single page, no delete/favourite/burst, no time sync, no `0x01/0x01` playback route).
-use super::manifest::collect_stores;
+//! media listing and commands. Ported from Osmosis `DumlSession.kt` / `CameraSession.kt`.
+use super::manifest::{collect_stores, decode_manifest};
 use super::paging::{
     seed_cursors, slice_info, step_pagination, SliceInfo, NEWEST_INTERNAL, NEWEST_SD,
 };
@@ -49,6 +48,7 @@ const LIST_TRIGGER: [u8; 14] = [0x4a, 0x04, 0x0e, 0x10, 0x01, 0, 0, 0, 0, 0, 0x0
 const DEFAULT_PAGE_SIZE: u8 = 45;
 const SD_CTR: u8 = 1;
 const INTERNAL_CTR: u8 = 2;
+const GROUP_LIMIT: u8 = 120;
 
 fn hex(s: &str) -> Vec<u8> {
     (0..s.len())
@@ -84,6 +84,15 @@ fn list_cmd(ctr: u8, cursor: u32, page_size: u8, highlights_only: bool) -> Vec<u
     c[10..14].copy_from_slice(&cursor.to_le_bytes());
     c[14] = page_size;
     c[37] = if highlights_only { 0x02 } else { 0x00 };
+    c
+}
+
+fn group_cmd(handle: u32) -> Vec<u8> {
+    let mut c =
+        hex("4a002a10190000000000804710400600100100ffffffffffffffff000100000000000000000000010000");
+    c[4] = SD_CTR;
+    c[10..14].copy_from_slice(&handle.to_le_bytes());
+    c[14] = GROUP_LIMIT;
     c
 }
 
@@ -210,6 +219,10 @@ pub enum SessionError {
     NoHandshake { addr: String },
     #[error(transparent)]
     Io(#[from] io::Error),
+    #[error("burst expansion requires a numbered group lead with a fitted command handle and confirmed playback")]
+    InvalidGroup,
+    #[error("burst expansion did not return a complete group; retry with verbose logging")]
+    IncompleteGroup,
 }
 
 type Logger = Box<dyn FnMut(&str) + Send>;
@@ -655,6 +668,58 @@ impl<D: Datagram> CameraSession<D> {
         self.seen = files.iter().map(|f| (f.storage, f.path.clone())).collect();
         (self.sd_cursor, self.internal_cursor, self.more_available) =
             seed_cursors(&files, &self.last_slices, self.page_size as usize);
+        Ok(files)
+    }
+
+    /// Expand a burst/interval lead on the current playback session. Ported from Osmosis;
+    /// not yet verified on an Action 4. Returned frame handles are intentionally unavailable.
+    pub fn expand_burst_group(
+        &mut self,
+        lead: &CameraFile,
+    ) -> Result<Vec<CameraFile>, SessionError> {
+        let base = lead.group_key().ok_or(SessionError::InvalidGroup)?;
+        if lead.cmd_handle == 0 || !self.playback_held {
+            return Err(SessionError::InvalidGroup);
+        }
+        let dir = lead.path.rsplit_once('/').map_or("", |(dir, _)| dir);
+        let mut blob = Vec::new();
+        self.send(0, 0x26, &group_cmd(lead.cmd_handle), 1, 0);
+        for batch in 0..self.timing.max_batches {
+            self.collect(&mut blob, self.timing.batch);
+            if batch == 1 {
+                self.send(0, 0x26, &LIST_TRIGGER, 1, 0);
+            }
+            self.log(format!(
+                "group: batch {batch}: {} bytes, replies by counter {:?}",
+                blob.len(),
+                chunk_tally(&blob)
+            ));
+            if batch >= 1 && streams_ended(&blob, &[SD_CTR]) {
+                break;
+            }
+        }
+        let info = slice_info(&blob, SD_CTR);
+        if !info.ended || info.incomplete() || info.records >= GROUP_LIMIT as usize {
+            self.log(format!("group: incomplete response: {info:?}"));
+            return Err(SessionError::IncompleteGroup);
+        }
+        let mut files = decode_manifest(&manifest_bytes(&blob, Some(SD_CTR)));
+        files.retain(|f| {
+            f.group_key() == Some(base) && f.path.rsplit_once('/').is_some_and(|(d, _)| d == dir)
+        });
+        if files.is_empty() || !files.iter().any(|f| f.path == lead.path) {
+            self.log("group: reply did not include the requested lead");
+            return Err(SessionError::IncompleteGroup);
+        }
+        for f in &mut files {
+            f.storage = lead.storage;
+            f.handle = 0;
+            f.cmd_handle = 0;
+            f.handle_candidate = 0;
+            f.handle_shared = false;
+        }
+        files.sort_by_key(|f| f.sub_index());
+        self.log(format!("group: {} frames for {}", files.len(), lead.path));
         Ok(files)
     }
 

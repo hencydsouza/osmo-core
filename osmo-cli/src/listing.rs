@@ -169,10 +169,15 @@ pub fn format_listing(files: &[CameraFile]) -> String {
     for f in files {
         let store = if f.storage == 1 { "internal" } else { "sd" };
         let star = if f.starred { " \u{2605}" } else { "" };
+        let burst = if f.group_key().is_some() {
+            " [burst]"
+        } else {
+            ""
+        };
         lines.push(row(
             store,
             &human_size(f.size_bytes),
-            &format!("{}{star}", f.path),
+            &format!("{}{star}{burst}", f.path),
         ));
     }
     lines.join("\n")
@@ -462,6 +467,12 @@ mod tests {
             "{w}"
         );
         assert_eq!(truncation_warning(false), None);
+    }
+
+    #[test]
+    fn listing_identifies_numbered_burst_leads() {
+        let output = format_listing(&[file("DCIM/DJI_001/SHOT_D_001.JPG", 0, 10)]);
+        assert!(output.contains("SHOT_D_001.JPG [burst]"));
     }
 
     #[test]

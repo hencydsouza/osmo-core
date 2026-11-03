@@ -32,6 +32,29 @@ pub struct CameraFile {
 }
 
 impl CameraFile {
+    /// Shared filename stem for numbered burst/interval frames, if present.
+    pub fn group_key(&self) -> Option<&str> {
+        let (stem, ext) = self.name.rsplit_once('.')?;
+        if ext.is_empty() || !ext.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_') {
+            return None;
+        }
+        let (base, index) = stem.rsplit_once('_')?;
+        (!base.is_empty() && index.len() == 3 && index.bytes().all(|b| b.is_ascii_digit()))
+            .then_some(base)
+    }
+
+    /// Three-digit frame index, or `None` for an ordinary file.
+    pub fn sub_index(&self) -> Option<u16> {
+        self.group_key()?;
+        self.name
+            .rsplit_once('.')?
+            .0
+            .rsplit_once('_')?
+            .1
+            .parse()
+            .ok()
+    }
+
     /// Unlisted files the camera may keep beside this one, same path with the extension swapped and on the
     /// same store: a `.DNG` beside a still (JPEG+RAW mode) and a `.WAV` beside a clip (audio backup). These are
     /// candidates only; the manifest never lists them, so ask the camera.
@@ -103,6 +126,22 @@ mod tests {
             handle_candidate: 0,
             handle_shared: false,
             starred: false,
+        }
+    }
+
+    #[test]
+    fn burst_names_require_an_exact_three_digit_suffix() {
+        let f = file("DCIM/DJI_001/DJI_20260903165023_0012_D_003.JPG", "JPG");
+        assert_eq!(f.group_key(), Some("DJI_20260903165023_0012_D"));
+        assert_eq!(f.sub_index(), Some(3));
+        for path in [
+            "DCIM/x/PHOTO.JPG",
+            "DCIM/x/PHOTO_01.JPG",
+            "DCIM/x/PHOTO_1234.JPG",
+            "DCIM/x/_001.JPG",
+            "DCIM/x/PHOTO_001.",
+        ] {
+            assert_eq!(file(path, "JPG").group_key(), None, "{path}");
         }
     }
 

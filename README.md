@@ -34,11 +34,17 @@ osmo ls --all                 # every file, paged (--page-size N to force small 
 osmo ls --photos|--videos      # only photos or only videos; --starred for favourites only (combine with --all)
 osmo thumb <path> -o t.jpg    # the camera's thumbnail
 osmo marks <video-path>        # highlight marks (moments tagged while recording), as m:ss.mmm
+osmo burst <group-lead-path>   # list burst/interval frames; not yet verified on an Action 4
 osmo star <path>              # favourite a file (--off does NOT work on an Action 4)
 osmo rm <path>                # dry run: shows what would be deleted
 osmo rm <path> --yes          # really delete (cannot be undone)
 osmo sync-time                # set the camera's clock and time zone from this computer's
 ```
+
+`ls` marks numbered burst/interval leads with `[burst]`. `burst` requires a fitted command handle and
+reports an error when the reply is incomplete or reaches the 120-frame request limit. Frame handles are
+not exposed for deletion or favourite operations. To download an individual expanded frame, use its printed
+path with `osmo get --storage 0 <path>` for SD (or `--storage 1` for internal storage).
 
 `rm` deletes only exact paths from the newest listing, all or nothing: a typo, glob, or a file without a verified
 handle refuses the whole command and nothing is sent. It confirms on a fresh session that the files are gone

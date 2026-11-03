@@ -82,8 +82,17 @@ enum Cmd {
         highlights: bool,
     },
     /// Show a video's highlight marks (the moments tagged while recording). PATH is as `osmo ls` prints it.
-    /// UNVERIFIED on an Action 4: a clip without marks gets 'bad parameter' (0xe3), and no clip here has marks.
+    /// UNVERIFIED on an Action 4: the tested clip returned 'bad parameter' (0xe3); its cause is unknown.
     Marks {
+        path: String,
+        #[arg(long, default_value = CAMERA_IP)]
+        ip: String,
+        #[arg(long, default_value_t = 9004)]
+        port: u16,
+    },
+    /// List the frames of a burst or interval group. Not yet verified on an Action 4.
+    Burst {
+        /// The group lead path as printed by `osmo ls`.
         path: String,
         #[arg(long, default_value = CAMERA_IP)]
         ip: String,
@@ -374,6 +383,18 @@ fn marks_cmd(path: &str, ip: &str, port: u16, verbose: bool) -> Result<(), Strin
     }
     let marks = sess.highlights(&file).map_err(|e| e.to_string())?;
     println!("{}", format_marks(&marks));
+    Ok(())
+}
+
+fn burst_cmd(path: &str, ip: &str, port: u16, verbose: bool) -> Result<(), String> {
+    let path = validate_get_path(path)?;
+    let mut sess = open_session(ip, port, verbose)?;
+    eprintln!("Looking up {path} ...");
+    let file = sess.find_file(path).map_err(session_err)?.ok_or(
+        "not found anywhere in the camera's library: check the path against `osmo ls --all`",
+    )?;
+    let files = sess.expand_burst_group(&file).map_err(session_err)?;
+    println!("{}", format_listing(&files));
     Ok(())
 }
 
@@ -775,6 +796,7 @@ fn run() -> Result<(), String> {
         } => thumb_cmd(&path, &out, &ip, port, storage, cli.verbose),
         Cmd::SyncTime { ip, port } => sync_time_cmd(&ip, port, cli.verbose),
         Cmd::Marks { path, ip, port } => marks_cmd(&path, &ip, port, cli.verbose),
+        Cmd::Burst { path, ip, port } => burst_cmd(&path, &ip, port, cli.verbose),
         Cmd::Rm {
             paths,
             yes,
@@ -817,7 +839,8 @@ fn run() -> Result<(), String> {
                 | Cmd::Star { .. }
                 | Cmd::Rm { .. }
                 | Cmd::SyncTime { .. }
-                | Cmd::Marks { .. } => {
+                | Cmd::Marks { .. }
+                | Cmd::Burst { .. } => {
                     unreachable!("handled above")
                 }
             }
