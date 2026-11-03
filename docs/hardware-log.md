@@ -160,3 +160,5 @@ multi-attempt download *with* keepalive (no cuts happened in either keepalive ru
 - `osmo ls --highlights` sends list query byte 37 = 2, intended to filter for marked clips.
 
 - `osmo -v ls --highlights` returned an empty list with an end frame. The filter has not been checked with a known marked clip, so this does not prove the card has no marks or explain `e3`. A known tagged clip is needed to test both filter and decoder.
+
+- macOS Wi-Fi helper: a live attempt to join the Action 4 hotspot immediately after BLE wake returned "Could not find network"; another attempt returned `-3900`. Rejoining the saved home network without a password also returned `-3900`. Both SSIDs were in the preferred-network list. The cause is unconfirmed; retries and Keychain-supplied passwords are implemented but need live verification.

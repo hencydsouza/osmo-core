@@ -5,11 +5,36 @@ use std::ffi::OsString;
 trait Host {
     fn current_network(&mut self) -> Option<String>;
     fn wake_camera(&mut self) -> Result<String, String>;
+    fn prepare_credentials(&mut self, original: &str, camera: &str) -> Result<(), String>;
     fn join(&mut self, ssid: &str) -> Result<(), String>;
     fn wait_camera(&mut self, ssid: &str) -> Result<(), String>;
     fn run_command(&mut self, args: &[OsString]) -> Result<(), String>;
     fn verify_restore(&mut self, ssid: &str) -> Result<(), String>;
     fn check_interrupt(&mut self) -> Result<(), String>;
+    fn wait_retry(&mut self);
+}
+
+#[cfg(any(target_os = "macos", test))]
+fn join_with_retry(
+    host: &mut impl Host,
+    ssid: &str,
+    attempts: usize,
+    interruptible: bool,
+) -> Result<(), String> {
+    for attempt in 1..=attempts {
+        if interruptible {
+            host.check_interrupt()?;
+        }
+        match host.join(ssid) {
+            Ok(()) => return Ok(()),
+            Err(e) if attempt == attempts => return Err(e),
+            Err(e) => {
+                eprintln!("Wi-Fi join attempt {attempt}/{attempts} failed: {e}; retrying ...");
+                host.wait_retry();
+            }
+        }
+    }
+    Err("no Wi-Fi attempts configured".into())
 }
 
 #[cfg(any(target_os = "macos", test))]
@@ -30,22 +55,29 @@ fn with_wifi(
         return Err("The camera did not provide a Wi-Fi name".into());
     }
     let switched = original != camera;
+    if switched {
+        host.prepare_credentials(&original, &camera)?;
+        host.check_interrupt()?;
+    }
+    let mut joined_camera = false;
     let result = (|| {
         if switched {
             eprintln!("Connecting to camera Wi-Fi {camera} ...");
-            host.join(&camera).map_err(|e| {
-                format!("{e}; join the camera Wi-Fi once in macOS to save its password")
+            join_with_retry(host, &camera, 6, true).map_err(|e| {
+                format!("{e}; check that the camera hotspot is awake and its Wi-Fi password is saved in macOS")
             })?;
+            joined_camera = true;
         }
         host.check_interrupt()?;
         host.wait_camera(&camera)?;
         host.check_interrupt()?;
         host.run_command(args)
     })();
-    let restore = if switched {
+    let still_original =
+        switched && !joined_camera && host.current_network().as_deref() == Some(original.as_str());
+    let restore = if switched && !still_original {
         eprintln!("Reconnecting to {original} ...");
-        host.join(&original)
-            .and_then(|()| host.verify_restore(&original))
+        join_with_retry(host, &original, 4, false).and_then(|()| host.verify_restore(&original))
     } else {
         Ok(())
     };
@@ -62,6 +94,7 @@ fn with_wifi(
 #[cfg(target_os = "macos")]
 mod macos {
     use super::*;
+    use std::collections::HashMap;
     use std::net::Ipv4Addr;
     use std::process::{Command, Stdio};
     use std::sync::atomic::{AtomicI32, Ordering};
@@ -108,6 +141,7 @@ mod macos {
 
     struct Mac {
         device: String,
+        passwords: HashMap<String, String>,
     }
     impl Mac {
         fn new() -> Result<Self, String> {
@@ -128,6 +162,7 @@ mod macos {
                     if let Some(device) = line.strip_prefix("Device: ") {
                         return Ok(Self {
                             device: device.to_owned(),
+                            passwords: HashMap::new(),
                         });
                     }
                 }
@@ -168,9 +203,50 @@ mod macos {
                 .ok_or_else(|| "the camera did not provide its Wi-Fi name".into())
         }
 
+        fn prepare_credentials(&mut self, original: &str, camera: &str) -> Result<(), String> {
+            for ssid in [original, camera] {
+                if self.passwords.contains_key(ssid) {
+                    continue;
+                }
+                self.check_interrupt()?;
+                eprintln!("Reading saved Wi-Fi password for {ssid} from Keychain ...");
+                let output = Command::new("security")
+                    .args([
+                        "find-generic-password",
+                        "-a",
+                        ssid,
+                        "-D",
+                        "AirPort network password",
+                        "-w",
+                    ])
+                    .output()
+                    .map_err(|e| format!("could not access Keychain: {e}"))?;
+                if !output.status.success() {
+                    return Err(format!("could not read the saved Wi-Fi password for {ssid} from Keychain; allow access or join the network once in macOS"));
+                }
+                let mut password = String::from_utf8(output.stdout)
+                    .map_err(|_| format!("the saved password for {ssid} is not UTF-8"))?;
+                if password.ends_with('\n') {
+                    password.pop();
+                    if password.ends_with('\r') {
+                        password.pop();
+                    }
+                }
+                if password.is_empty() {
+                    return Err(format!("the saved password for {ssid} is empty"));
+                }
+                self.passwords.insert(ssid.to_owned(), password);
+            }
+            Ok(())
+        }
+
         fn join(&mut self, ssid: &str) -> Result<(), String> {
+            let password = self
+                .passwords
+                .get(ssid)
+                .ok_or_else(|| format!("no saved password for {ssid}"))?;
             let out = Command::new("networksetup")
-                .args(["-setairportnetwork", &self.device, ssid])
+                .args(["-setairportnetwork", &self.device, ssid, password])
                 .output()
                 .map_err(|e| e.to_string())?;
             let message = format!(
@@ -184,7 +260,10 @@ mod macos {
                 || lower.contains("error")
                 || lower.contains("could not")
             {
-                return Err(format!("could not join {ssid}: {}", message.trim()));
+                return Err(format!(
+                    "could not join {ssid}: {}",
+                    message.trim().replace(password, "[redacted]")
+                ));
             }
             Ok(())
         }
@@ -252,6 +331,10 @@ mod macos {
                 Err(format!("interrupted by signal {signal}"))
             }
         }
+
+        fn wait_retry(&mut self) {
+            thread::sleep(Duration::from_secs(2));
+        }
     }
 
     pub fn run(return_to: Option<&str>, args: &[OsString]) -> Result<(), String> {
@@ -292,6 +375,12 @@ mod tests {
         join_fails: bool,
         restore_fails: bool,
         wait_interrupted: bool,
+        camera_failures: usize,
+        home_failures: usize,
+        retry_waits: usize,
+        credentials_missing: bool,
+        interrupt_on_retry: bool,
+        disconnect_on_failure: bool,
     }
 
     impl Host for Fake {
@@ -301,8 +390,26 @@ mod tests {
         fn wake_camera(&mut self) -> Result<String, String> {
             Ok("Camera WiFi".into())
         }
+        fn prepare_credentials(&mut self, _: &str, _: &str) -> Result<(), String> {
+            if self.credentials_missing {
+                Err("Keychain access failed".into())
+            } else {
+                Ok(())
+            }
+        }
         fn join(&mut self, name: &str) -> Result<(), String> {
             self.joins.push(name.into());
+            if name == "Camera WiFi" && self.camera_failures > 0 {
+                self.camera_failures -= 1;
+                if self.disconnect_on_failure {
+                    self.current = None;
+                }
+                return Err("Could not find network".into());
+            }
+            if name == "Home WiFi" && self.home_failures > 0 {
+                self.home_failures -= 1;
+                return Err("temporary join failure".into());
+            }
             if (name == "Camera WiFi" && self.join_fails)
                 || (name == "Home WiFi" && self.restore_fails)
             {
@@ -330,7 +437,14 @@ mod tests {
             Ok(())
         }
         fn check_interrupt(&mut self) -> Result<(), String> {
-            Ok(())
+            if self.interrupt_on_retry && self.retry_waits > 0 {
+                Err("interrupted".into())
+            } else {
+                Ok(())
+            }
+        }
+        fn wait_retry(&mut self) {
+            self.retry_waits += 1;
         }
     }
 
@@ -343,6 +457,12 @@ mod tests {
             join_fails: false,
             restore_fails: false,
             wait_interrupted: false,
+            camera_failures: 0,
+            home_failures: 0,
+            retry_waits: 0,
+            credentials_missing: false,
+            interrupt_on_retry: false,
+            disconnect_on_failure: false,
         }
     }
 
@@ -368,7 +488,7 @@ mod tests {
         let mut h = fake();
         h.join_fails = true;
         assert!(with_wifi(&mut h, None, &["ls".into()]).is_err());
-        assert_eq!(h.joins, ["Camera WiFi", "Home WiFi"]);
+        assert_eq!(h.joins, ["Camera WiFi"; 6]);
         assert!(h.calls.is_empty());
     }
 
@@ -397,6 +517,49 @@ mod tests {
     fn interruption_after_switch_still_restores() {
         let mut h = fake();
         h.wait_interrupted = true;
+        assert!(with_wifi(&mut h, None, &["ls".into()])
+            .unwrap_err()
+            .contains("interrupted"));
+        assert_eq!(h.joins, ["Camera WiFi", "Home WiFi"]);
+        assert!(h.calls.is_empty());
+    }
+
+    #[test]
+    fn retries_camera_hotspot_and_original_network_before_giving_up() {
+        let mut h = fake();
+        h.camera_failures = 2;
+        h.home_failures = 2;
+        with_wifi(&mut h, None, &["ls".into()]).unwrap();
+        assert_eq!(
+            h.joins,
+            [
+                "Camera WiFi",
+                "Camera WiFi",
+                "Camera WiFi",
+                "Home WiFi",
+                "Home WiFi",
+                "Home WiFi"
+            ]
+        );
+        assert_eq!(h.retry_waits, 4);
+    }
+
+    #[test]
+    fn refuses_to_switch_if_saved_credentials_cannot_be_read() {
+        let mut h = fake();
+        h.credentials_missing = true;
+        assert!(with_wifi(&mut h, None, &["ls".into()])
+            .unwrap_err()
+            .contains("Keychain"));
+        assert!(h.joins.is_empty());
+    }
+
+    #[test]
+    fn interrupt_during_retry_stops_camera_attempts_and_restores() {
+        let mut h = fake();
+        h.camera_failures = 3;
+        h.interrupt_on_retry = true;
+        h.disconnect_on_failure = true;
         assert!(with_wifi(&mut h, None, &["ls".into()])
             .unwrap_err()
             .contains("interrupted"));

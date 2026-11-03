@@ -79,9 +79,10 @@ export OSMO_RETURN_TO='Your home Wi-Fi'
 ./target/debug/osmo with-wifi -- -v ls
 ```
 
-The helper uses saved macOS Wi-Fi credentials, never stores passwords, and currently expects the Action 4's
-`192.168.2.x` network. If macOS hides network names, it cannot verify the final reconnection; check the Wi-Fi menu
-if needed.
+The helper reads both saved Wi-Fi passwords from macOS Keychain before switching; macOS may ask you to allow
+access. It passes passwords as arguments to macOS `networksetup`, where other local processes can briefly see them,
+but does not save or print them. It currently expects the Action 4's `192.168.2.x` network. If macOS hides network
+names, it cannot verify the final reconnection; check the Wi-Fi menu if needed.
 
 ## Develop
 
