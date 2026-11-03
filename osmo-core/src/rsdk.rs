@@ -302,6 +302,8 @@ pub struct Session<'a> {
     decoder: Reassembler,
     pending: VecDeque<Frame>,
     seq: u16,
+    last_status: Option<Instant>,
+    last_subscription: Instant,
 }
 
 impl Session<'_> {
@@ -351,11 +353,26 @@ impl Session<'_> {
     pub fn poll(&mut self, wait: Duration) -> Result<Option<CameraStatus>, SessionError> {
         let end = Instant::now() + wait;
         while Instant::now() < end {
+            let stale = self
+                .last_status
+                .is_none_or(|last| last.elapsed() > Duration::from_secs(2));
+            if stale && self.last_subscription.elapsed() >= Duration::from_millis(1500) {
+                let seq = self.next_seq();
+                self.send(0x1d, 5, 0, &status_subscription(3, 20), seq)?;
+                self.last_subscription = Instant::now();
+            }
             if let Some(frame) = self.receive(end.saturating_duration_since(Instant::now()))? {
                 if (frame.set, frame.id) == (0x1d, 0x02) {
                     if let Some(status) = camera_status(&frame.payload) {
+                        self.last_status = Some(Instant::now());
                         return Ok(Some(status));
                     }
+                } else if (frame.set, frame.id) == (0x1d, 0x06)
+                    && frame.payload.len() >= 46
+                    && frame.payload[0] == 1
+                    && frame.payload[23] == 2
+                {
+                    self.last_status = Some(Instant::now());
                 }
             }
         }
@@ -380,6 +397,8 @@ pub fn connect<'a>(
         decoder: Reassembler::default(),
         pending: VecDeque::new(),
         seq: 0,
+        last_status: None,
+        last_subscription: Instant::now(),
     };
     let request = connection_request(identity.device_id, identity.mac, 0, verify_data);
     let seq = session.next_seq();
@@ -419,6 +438,7 @@ pub fn connect<'a>(
         )?;
         let seq = session.next_seq();
         session.send(0x1d, 5, 0, &status_subscription(3, 20), seq)?;
+        session.last_subscription = Instant::now();
         return Ok(session);
     }
 }
