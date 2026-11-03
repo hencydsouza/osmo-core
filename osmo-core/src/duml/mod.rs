@@ -1,6 +1,7 @@
 pub mod commands;
 pub mod crc;
 pub mod frame;
+pub mod rtmp;
 pub mod scan;
 
 pub use crc::{crc16, crc8};
