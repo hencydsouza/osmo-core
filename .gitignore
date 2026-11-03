@@ -4,3 +4,4 @@
 *.btsnoop
 *.log
 .env
+__pycache__/

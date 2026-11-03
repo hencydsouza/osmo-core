@@ -59,6 +59,30 @@ with no drop (`--no-keepalive` turns it off, and `--storage` skips the datalink 
 
 macOS: your terminal needs Bluetooth permission (System Settings > Privacy & Security > Bluetooth).
 
+### macOS Wi-Fi helper
+
+Join the camera's Wi-Fi once in macOS so its password is saved. Then the helper wakes the camera over Bluetooth,
+joins its Wi-Fi, runs an `osmo` command, and attempts to reconnect to the original network, including on failure
+or interruption:
+
+```sh
+./scripts/osmo-wifi-run -- -v ls
+./scripts/osmo-wifi-run -- -v burst 'DCIM/DJI_001/your-burst-lead.JPG'
+```
+
+macOS may hide the current Wi-Fi name from terminal programs. If it does, provide the network to return to:
+
+```sh
+./scripts/osmo-wifi-run --return-to 'Your home Wi-Fi' -- -v ls
+# Or set once per shell (add this to ~/.zshrc to keep it):
+export OSMO_RETURN_TO='Your home Wi-Fi'
+./scripts/osmo-wifi-run -- -v ls
+```
+
+The helper uses saved macOS Wi-Fi credentials, never stores passwords, and currently expects the Action 4's
+`192.168.2.x` network. If macOS hides network names, it cannot verify the final reconnection; check the Wi-Fi menu
+if needed. The default binary is `target/debug/osmo`; set `OSMO_BIN` to use another build.
+
 ## Develop
 
 ```
