@@ -46,6 +46,8 @@ impl Default for PairOptions {
 
 #[derive(Debug, Error)]
 pub enum PairError {
+    #[error("operation interrupted")]
+    Cancelled,
     #[error("pairing was not approved on the camera")]
     NotApproved,
     #[error("no reply from the camera to {0}")]
@@ -83,14 +85,21 @@ impl<'a> Session<'a> {
         }
     }
 
-    fn wake_and_pair(&mut self, on_step: &mut dyn FnMut(&str)) -> Result<(), PairError> {
+    fn wake_and_pair(
+        &mut self,
+        on_step: &mut dyn FnMut(&str),
+        cancelled: &dyn Fn() -> bool,
+    ) -> Result<(), PairError> {
+        if cancelled() {
+            return Err(PairError::Cancelled);
+        }
         on_step("Waking the camera");
         let id = self.id();
         self.write(&session_ping(&SESSION_WAKE, id))?;
         self.woken = true;
         self.last_keepalive = Instant::now();
         on_step("Pairing");
-        self.pair(on_step)?;
+        self.pair(on_step, cancelled)?;
         self.keepalive()
     }
 
@@ -188,16 +197,26 @@ impl<'a> Session<'a> {
         }
     }
 
-    fn pair(&mut self, on_step: &mut dyn FnMut(&str)) -> Result<(), PairError> {
+    fn pair(
+        &mut self,
+        on_step: &mut dyn FnMut(&str),
+        cancelled: &dyn Fn() -> bool,
+    ) -> Result<(), PairError> {
         let deadline = Instant::now() + self.opts.approve_timeout;
         let (mut got_reply, mut prompted) = (false, false);
         loop {
+            if cancelled() {
+                return Err(PairError::Cancelled);
+            }
             self.pending.clear();
             let id = self.id();
             let frame = set_pairing_pin(&self.opts.pin, &self.opts.identifier, id);
             self.write(&frame)?;
             let step_end = Instant::now() + self.opts.step_timeout;
             while Instant::now() < step_end && !self.approved {
+                if cancelled() {
+                    return Err(PairError::Cancelled);
+                }
                 if let Some(f) = self.take_reply(0x07, 0x45) {
                     got_reply = true;
                     match f.payload.get(1) {
@@ -256,7 +275,7 @@ pub fn pair_and_read_wifi(
     on_step: &mut dyn FnMut(&str),
 ) -> Result<WifiCreds, PairError> {
     let mut s = Session::new(link, opts);
-    s.wake_and_pair(on_step)?;
+    s.wake_and_pair(on_step, &|| false)?;
     // `0x53/0x10` (to type 0x1C, not the camera) is what actually wakes a sleeping camera and brings its
     // WiFi AP up; the camera answers `01 00 00 00`. Fire and forget, as Osmosis does.
     let id = s.id();
@@ -299,6 +318,8 @@ pub struct StreamConfig<'a> {
 
 #[derive(Debug, Error)]
 pub enum StreamError {
+    #[error("operation interrupted")]
+    Cancelled,
     #[error(transparent)]
     Pair(#[from] PairError),
     #[error(transparent)]
@@ -318,8 +339,12 @@ fn stream_request(
     cmd: u8,
     step: &'static str,
     attempts: usize,
+    cancelled: &dyn Fn() -> bool,
 ) -> Result<Frame, StreamError> {
     for _ in 0..attempts {
+        if cancelled() {
+            return Err(StreamError::Cancelled);
+        }
         // Discard previously queued replies before a new request: several stream steps share 0x02/0x8e.
         for _ in 0..64 {
             if !s.pump(Duration::ZERO)? {
@@ -328,8 +353,18 @@ fn stream_request(
         }
         s.pending.clear();
         s.write(frame)?;
-        if let Some(reply) = s.await_reply(set, cmd, s.opts.step_timeout)? {
-            return Ok(reply);
+        let end = Instant::now() + s.opts.step_timeout;
+        loop {
+            if cancelled() {
+                return Err(StreamError::Cancelled);
+            }
+            if let Some(reply) = s.take_reply(set, cmd) {
+                return Ok(reply);
+            }
+            if Instant::now() >= end {
+                break;
+            }
+            s.pump(end.saturating_duration_since(Instant::now()))?;
         }
     }
     Err(StreamError::NoReply(step))
@@ -386,6 +421,17 @@ pub fn start_livestream<'a>(
     config: &StreamConfig<'_>,
     on_step: &mut dyn FnMut(&str),
 ) -> Result<LiveStream<'a>, StreamError> {
+    start_livestream_cancellable(link, opts, config, on_step, &|| false)
+}
+
+/// Like `start_livestream`, but checks `cancelled` during pairing and between setup requests.
+pub fn start_livestream_cancellable<'a>(
+    link: &'a mut dyn BleLink,
+    opts: &'a PairOptions,
+    config: &StreamConfig<'_>,
+    on_step: &mut dyn FnMut(&str),
+    cancelled: &dyn Fn() -> bool,
+) -> Result<LiveStream<'a>, StreamError> {
     if config.ssid.is_empty() {
         return Err(StreamError::Invalid("Wi-Fi SSID is empty"));
     }
@@ -414,7 +460,7 @@ pub fn start_livestream<'a>(
         config.action5_pro,
     )?;
     let mut s = Session::new(link, opts);
-    s.wake_and_pair(on_step)?;
+    s.wake_and_pair(on_step, cancelled)?;
     on_step("Preparing stream");
     let reply = stream_request(
         &mut s,
@@ -423,6 +469,7 @@ pub fn start_livestream<'a>(
         0xe1,
         "prepare stage 1",
         2,
+        cancelled,
     )?;
     match reply.payload.first() {
         Some(0) => {}
@@ -441,16 +488,21 @@ pub fn start_livestream<'a>(
         0x8e,
         "prepare stage 2",
         2,
+        cancelled,
     )?;
     on_step("Connecting camera to Wi-Fi");
-    let reply = stream_request(&mut s, &wifi, 7, 0x47, "Wi-Fi connection", 3)?;
+    let reply = stream_request(&mut s, &wifi, 7, 0x47, "Wi-Fi connection", 3, cancelled)?;
     if reply.payload.len() < 2 {
         return Err(StreamError::Invalid("short Wi-Fi response"));
     }
-    if reply.payload[0] != 0 {
+    if reply.payload[0] != 0 || reply.payload[1] != 0 {
         return Err(StreamError::Rejected {
             step: "Wi-Fi connection",
-            status: reply.payload[0],
+            status: if reply.payload[0] != 0 {
+                reply.payload[0]
+            } else {
+                reply.payload[1]
+            },
         });
     }
     if let Some(eis) = config.stabilization {
@@ -462,10 +514,19 @@ pub fn start_livestream<'a>(
             0x8e,
             "stabilization",
             2,
+            cancelled,
         )?;
     }
     on_step("Configuring stream");
-    let reply = stream_request(&mut s, &configure, 8, 0x78, "stream configuration", 2)?;
+    let reply = stream_request(
+        &mut s,
+        &configure,
+        8,
+        0x78,
+        "stream configuration",
+        2,
+        cancelled,
+    )?;
     if let Some(&status) = reply.payload.first().filter(|&&v| v != 0) {
         return Err(StreamError::Rejected {
             step: "stream configuration",
@@ -473,7 +534,18 @@ pub fn start_livestream<'a>(
         });
     }
     on_step("Starting stream");
-    if let Err(e) = stream_request(&mut s, &rtmp::start_stream(), 2, 0x8e, "stream start", 2) {
+    if cancelled() {
+        return Err(StreamError::Cancelled);
+    }
+    if let Err(e) = stream_request(
+        &mut s,
+        &rtmp::start_stream(),
+        2,
+        0x8e,
+        "stream start",
+        2,
+        cancelled,
+    ) {
         // A lost acknowledgement does not prove the camera ignored start.
         let _ = s.write(&rtmp::stop_stream());
         return Err(e);

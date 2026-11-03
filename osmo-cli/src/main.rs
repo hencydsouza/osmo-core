@@ -1,6 +1,6 @@
 mod ble_btleplug;
 
-use clap::{Parser, Subcommand};
+use clap::{Parser, Subcommand, ValueEnum};
 use osmo_cli::listing::{
     dest_filename, download_error_message, download_summary, file_from_path, fill_unknown_sizes,
     format_listing, format_status, human_size, known_size, parse_utc_offset, plan_deletions,
@@ -9,7 +9,10 @@ use osmo_cli::listing::{
 };
 use osmo_cli::listing::{filter_files, format_marks, Kind};
 use osmo_cli::{config, route::route_warning};
-use osmo_core::ble::{model_name, pair_and_read_wifi, PairOptions, WifiCreds};
+use osmo_core::ble::{
+    model_name, pair_and_read_wifi, start_livestream_cancellable, PairOptions, StreamConfig,
+    WifiCreds,
+};
 use osmo_core::datalink::{has_media_records, CameraSession, SessionConfig, SessionError};
 use osmo_core::embedded_jpeg::{embedded_jpeg, image_kind, HEAD_BYTES};
 use osmo_core::http::{HttpClient, Outcome};
@@ -36,8 +39,60 @@ struct Cli {
     cmd: Cmd,
 }
 
+#[derive(Clone, Copy, ValueEnum)]
+enum StreamResolution {
+    #[value(name = "480p")]
+    P480,
+    #[value(name = "720p")]
+    P720,
+    #[value(name = "1080p")]
+    P1080,
+}
+
+#[derive(Clone, Copy, ValueEnum)]
+enum StreamFps {
+    #[value(name = "25")]
+    F25,
+    #[value(name = "30")]
+    F30,
+}
+
+#[derive(Clone, Copy, ValueEnum)]
+enum StreamStabilization {
+    Off,
+    RockSteady,
+    HorizonSteady,
+    RockSteadyPlus,
+    HorizonBalancing,
+}
+
+#[derive(Clone, Copy, ValueEnum)]
+enum StreamModel {
+    Action4,
+    Action5Pro,
+    Other,
+}
+
 #[derive(Subcommand)]
 enum Cmd {
+    /// Start an RTMP livestream over Bluetooth. Set OSMO_RTMP_URL in .env; Ctrl-C sends stop.
+    Stream {
+        /// Camera identifier or name (defaults to the last paired camera).
+        #[arg(long)]
+        device: Option<String>,
+        #[arg(long, value_enum, default_value = "1080p")]
+        resolution: StreamResolution,
+        /// Bitrate in kilobits per second.
+        #[arg(long, default_value_t = 6000, value_parser = clap::value_parser!(u16).range(1..))]
+        bitrate: u16,
+        #[arg(long, value_enum, default_value = "30")]
+        fps: StreamFps,
+        /// Stabilization effect is not hardware-verified.
+        #[arg(long, value_enum, default_value = "off")]
+        stabilization: StreamStabilization,
+        #[arg(long, value_enum, default_value = "action4")]
+        model: StreamModel,
+    },
     /// Run an osmo command on camera Wi-Fi, then reconnect (macOS).
     WithWifi {
         /// Network to return to if macOS hides the current SSID. Can also use OSMO_RETURN_TO.
@@ -759,12 +814,146 @@ fn pair_cmd(
     Ok(())
 }
 
+fn wraps_stream(args: &[OsString]) -> bool {
+    let arguments = std::iter::once(OsString::from("osmo")).chain(args.iter().cloned());
+    match Cli::try_parse_from(arguments) {
+        Ok(Cli {
+            cmd: Cmd::Stream { .. },
+            ..
+        }) => true,
+        Ok(Cli {
+            cmd: Cmd::WithWifi { args, .. },
+            ..
+        }) => wraps_stream(&args),
+        _ => false,
+    }
+}
+
+struct StreamOpts {
+    device: Option<String>,
+    resolution: StreamResolution,
+    bitrate: u16,
+    fps: StreamFps,
+    stabilization: StreamStabilization,
+    model: StreamModel,
+}
+
+fn stream_cmd(options: StreamOpts) -> Result<(), String> {
+    let env =
+        osmo_cli::stream::StreamEnv::load(std::path::Path::new(".env"), |k| std::env::var(k).ok())?;
+    let resolution = match options.resolution {
+        StreamResolution::P480 => 0x47,
+        StreamResolution::P720 => 0x04,
+        StreamResolution::P1080 => 0x0a,
+    };
+    let fps = match options.fps {
+        StreamFps::F25 => 2,
+        StreamFps::F30 => 3,
+    };
+    let eis = match options.stabilization {
+        StreamStabilization::Off => 0,
+        StreamStabilization::RockSteady => 1,
+        StreamStabilization::HorizonSteady => 2,
+        StreamStabilization::RockSteadyPlus => 3,
+        StreamStabilization::HorizonBalancing => 4,
+    };
+    let settings = StreamConfig {
+        ssid: &env.ssid,
+        password: &env.password,
+        url: &env.url,
+        resolution,
+        bitrate_kbps: options.bitrate,
+        fps,
+        stabilization: match options.model {
+            StreamModel::Other => None,
+            _ => Some(eis),
+        },
+        action5_pro: matches!(options.model, StreamModel::Action5Pro),
+    };
+    // Reject oversized inputs before scanning, pairing, or changing the camera's network.
+    osmo_core::duml::rtmp::connect_wifi(settings.ssid, settings.password, 0x8c19)
+        .map_err(|e| e.to_string())?;
+    osmo_core::duml::rtmp::configure_stream(
+        settings.resolution,
+        settings.bitrate_kbps,
+        settings.fps,
+        settings.url,
+        settings.action5_pro,
+    )
+    .map_err(|e| e.to_string())?;
+    let interrupted = Arc::new(AtomicBool::new(false));
+    let flag = interrupted.clone();
+    ctrlc::try_set_handler(move || flag.store(true, Ordering::SeqCst))
+        .map_err(|e| format!("could not install stop handler: {e}"))?;
+    let rt = Arc::new(Runtime::new().map_err(|e| e.to_string())?);
+    let adapter = ble_btleplug::adapter(&rt)?;
+    let wanted = options.device.or_else(config::last_device);
+    let (cams, _) = ble_btleplug::scan(&rt, &adapter, 6)?;
+    if interrupted.load(Ordering::SeqCst) {
+        return Err("interrupted before streaming".into());
+    }
+    let camera = ble_btleplug::pick(cams, wanted.as_deref())
+        .ok_or("no matching camera found: is it on and awake? try `osmo scan`")?;
+    eprintln!(
+        "Connecting to {} ...",
+        camera.name.as_deref().unwrap_or(&camera.id)
+    );
+    let mut link = ble_btleplug::connect(rt, &camera)?;
+    let pair = PairOptions {
+        identifier: config::load_or_create_identity().map_err(|e| e.to_string())?,
+        ..Default::default()
+    };
+    let mut live = start_livestream_cancellable(
+        &mut link,
+        &pair,
+        &settings,
+        &mut |step| eprintln!("{step} ..."),
+        &|| interrupted.load(Ordering::SeqCst),
+    )
+    .map_err(|e| e.to_string())?;
+    let _ = config::save_last_device(&camera.id);
+    eprintln!("Start acknowledged; check the RTMP server for video. Press Ctrl-C to stop.");
+    let mut last_battery = None;
+    while !interrupted.load(Ordering::SeqCst) {
+        if let Some(pct) = live
+            .poll(Duration::from_millis(250))
+            .map_err(|e| e.to_string())?
+        {
+            if last_battery != Some(pct) {
+                eprintln!("Camera battery {pct}%");
+                last_battery = Some(pct);
+            }
+        }
+    }
+    live.stop().map_err(|e| e.to_string())?;
+    eprintln!("Stop requested; check the camera or server to confirm.");
+    Ok(())
+}
+
 fn run() -> Result<(), String> {
     let cli = Cli::parse();
     match cli.cmd {
         Cmd::WithWifi { return_to, args } => {
+            if wraps_stream(&args) {
+                return Err("run `osmo stream` directly; the camera joins your network instead of its own hotspot".into());
+            }
             osmo_cli::wifi::run(return_to.as_deref(), &args, wake_camera_for_wifi)
         }
+        Cmd::Stream {
+            device,
+            resolution,
+            bitrate,
+            fps,
+            stabilization,
+            model,
+        } => stream_cmd(StreamOpts {
+            device,
+            resolution,
+            bitrate,
+            fps,
+            stabilization,
+            model,
+        }),
         Cmd::Ls {
             ip,
             port,
@@ -869,7 +1058,8 @@ fn run() -> Result<(), String> {
                 | Cmd::SyncTime { .. }
                 | Cmd::Marks { .. }
                 | Cmd::Burst { .. }
-                | Cmd::WithWifi { .. } => {
+                | Cmd::WithWifi { .. }
+                | Cmd::Stream { .. } => {
                     unreachable!("handled above")
                 }
             }
@@ -884,5 +1074,31 @@ fn main() -> ExitCode {
             eprintln!("error: {e}");
             ExitCode::FAILURE
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn livestream_options_are_parsed_and_invalid_resolutions_rejected() {
+        let cli = Cli::try_parse_from([
+            "osmo",
+            "stream",
+            "--resolution",
+            "720p",
+            "--bitrate",
+            "4000",
+        ])
+        .unwrap();
+        assert!(matches!(cli.cmd, Cmd::Stream { bitrate: 4000, .. }));
+        assert!(Cli::try_parse_from(["osmo", "stream", "--resolution", "4k"]).is_err());
+    }
+
+    #[test]
+    fn wifi_wrapper_refuses_a_nested_livestream() {
+        assert!(wraps_stream(&["-v".into(), "stream".into()]));
+        assert!(!wraps_stream(&["get".into(), "stream".into()]));
     }
 }
