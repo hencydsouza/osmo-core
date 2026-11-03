@@ -24,6 +24,8 @@ wrap or replace `http.rs`. Swappable HTTP and network-join traits are planned fo
 ```
 cargo build --release
 osmo scan                     # find cameras over Bluetooth
+osmo cameras                  # list remembered cameras without scanning
+osmo cameras --scan           # include cameras seen in a Bluetooth scan
 osmo pair                     # pair; approve on the camera screen
 osmo wifi                     # print the camera's WiFi name and password
 # join that WiFi on this machine (the camera has no internet)
@@ -60,6 +62,12 @@ with no drop (`--no-keepalive` turns it off, and `--storage` skips the datalink 
 `-v` logs every download attempt.
 
 macOS: your terminal needs Bluetooth permission (System Settings > Privacy & Security > Bluetooth).
+
+Successful pairing and GPS or stream connections remember each camera's Bluetooth identifier, name, and model
+in the local configuration directory. The last camera is selected by default. Use `--device <id>` with `pair`,
+`wifi`, `stream`, or `gps` to select another camera; `osmo cameras --scan` shows identifiers. Name substrings
+are also accepted when they match exactly one camera. A camera marked `not seen` was not found in that scan;
+this does not establish that it is offline. Multiple-camera behavior has only been tested with simulated data.
 
 ### macOS Wi-Fi helper
 

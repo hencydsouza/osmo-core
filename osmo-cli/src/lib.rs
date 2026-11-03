@@ -1,3 +1,4 @@
+pub mod cameras;
 pub mod config;
 pub mod filter;
 pub mod gps;

@@ -5,7 +5,7 @@ use btleplug::api::{
 };
 use btleplug::platform::{Adapter, Manager, Peripheral};
 use futures::stream::StreamExt;
-use osmo_cli::filter::{bluetooth_hint, device_matches, looks_like_camera};
+use osmo_cli::filter::{bluetooth_hint, looks_like_camera, select_camera_index};
 use osmo_core::ble::{decode_advert, is_dji_company_id, BleLink, LinkError};
 use std::sync::{mpsc, Arc};
 use std::time::Duration;
@@ -68,9 +68,13 @@ pub fn scan(rt: &Runtime, adapter: &Adapter, seconds: u64) -> Result<(Vec<Found>
     })
 }
 
-pub fn pick(cams: Vec<Found>, wanted: Option<&str>) -> Option<Found> {
-    cams.into_iter()
-        .find(|c| wanted.is_none_or(|w| device_matches(&c.id, c.name.as_deref(), w)))
+pub fn pick(mut cams: Vec<Found>, wanted: Option<&str>) -> Result<Option<Found>, String> {
+    let candidates: Vec<_> = cams
+        .iter()
+        .map(|c| (c.id.as_str(), c.name.as_deref()))
+        .collect();
+    let index = select_camera_index(&candidates, wanted).map_err(str::to_owned)?;
+    Ok(index.map(|i| cams.swap_remove(i)))
 }
 
 pub struct BtleplugLink {
