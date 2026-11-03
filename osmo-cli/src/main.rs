@@ -2,10 +2,10 @@ mod ble_btleplug;
 
 use clap::{Parser, Subcommand};
 use osmo_cli::listing::{
-    dest_filename, download_error_message, file_from_path, fill_unknown_sizes, format_listing,
-    format_status, human_size, known_size, parse_utc_offset, plan_deletions, progress_line,
-    sidecars_to_fetch, thumb_sources, truncation_warning, validate_get_path, zone_from_link,
-    ThumbSource,
+    dest_filename, download_error_message, download_summary, file_from_path, fill_unknown_sizes,
+    format_listing, format_status, human_size, known_size, parse_utc_offset, plan_deletions,
+    progress_line, resolve_requested, sidecars_to_fetch, thumb_sources, truncation_warning,
+    validate_get_path, zone_from_link, ThumbSource,
 };
 use osmo_cli::{config, route::route_warning};
 use osmo_core::ble::{model_name, pair_and_read_wifi, PairOptions};
@@ -113,9 +113,12 @@ enum Cmd {
         #[arg(long, default_value_t = 9004)]
         port: u16,
     },
-    /// Download one file, resuming a partial one. PATH is the camera path exactly as `osmo ls` prints it.
+    /// Download files, resuming partial ones. Paths are exactly as `osmo ls` prints them.
     Get {
-        path: String,
+        /// One or more camera paths exactly as `osmo ls` prints them. Several are fetched in order; a completed
+        /// file is skipped, a failure is reported and the rest continue (a stall stops the batch).
+        #[arg(required = true)]
+        paths: Vec<String>,
         /// Directory to save into.
         #[arg(short, long, default_value = ".")]
         out: PathBuf,
@@ -454,56 +457,14 @@ struct GetOpts<'a> {
     verbose: bool,
 }
 
-fn get_cmd(path: &str, out: &PathBuf, opts: GetOpts) -> Result<(), String> {
-    let GetOpts {
-        ip,
-        port,
-        storage,
-        keepalive,
-        sidecars,
-        verbose,
-    } = opts;
-    let path = validate_get_path(path)?;
-    let http = HttpClient::new(ip);
-    if verbose {
-        http.set_logger(|l| eprintln!("  {l}"));
-    }
-    let (storage, size, session) = match storage {
-        Some(s) => {
-            warn_route(ip, port);
-            (s, http.head(&url_path(s, path)), None)
-        }
-        None => {
-            let mut sess = open_session(ip, port, verbose)?;
-            eprintln!("Looking up {path} ...");
-            let found = sess.find_file(path).map_err(session_err)?;
-            warn_if_unconfirmed(&sess);
-            let f = found.ok_or("not found anywhere in the camera's library: check the path against `osmo ls --all`")?;
-            (
-                f.storage,
-                known_size(&f, || http.head(&f.url_path())),
-                Some(sess),
-            )
-        }
-    };
-
-    std::fs::create_dir_all(out).map_err(|e| e.to_string())?;
-    let stop = Arc::new(AtomicBool::new(false));
-    let mut bg = None;
-    match session {
-        Some(mut s) if keepalive => {
-            let flag = stop.clone();
-            bg = Some(std::thread::spawn(move || {
-                while !flag.load(Ordering::Relaxed) {
-                    s.keepalive_tick();
-                }
-                s
-            }));
-        }
-        Some(mut s) => s.close(),
-        None => {}
-    }
-
+fn download_one(
+    http: &HttpClient,
+    out: &std::path::Path,
+    storage: u8,
+    path: &str,
+    size: Option<u64>,
+    sidecars: bool,
+) -> Result<Outcome, osmo_core::http::DownloadError> {
     let dest = out.join(dest_filename(path));
     let mut last = Instant::now() - Duration::from_secs(1);
     let result = http.download_resumable(&url_path(storage, path), &dest, size, &mut |n| {
@@ -515,7 +476,6 @@ fn get_cmd(path: &str, out: &PathBuf, opts: GetOpts) -> Result<(), String> {
     let final_len = std::fs::metadata(&dest).map(|m| m.len()).unwrap_or(0);
     eprintln!("\r{}      ", progress_line(final_len, size));
 
-    // Sidecars ride the same held datalink, before it is released.
     if sidecars && result.is_ok() {
         let file = file_from_path(storage, path);
         let found = sidecars_to_fetch(&file, &mut |u| http.head(u));
@@ -539,6 +499,117 @@ fn get_cmd(path: &str, out: &PathBuf, opts: GetOpts) -> Result<(), String> {
             }
         }
     }
+    match &result {
+        Ok(Outcome::Saved) => println!("Saved {}", dest.display()),
+        Ok(Outcome::AlreadyComplete) => println!("Already complete: {}", dest.display()),
+        Err(_) => {}
+    }
+    result
+}
+
+fn get_cmd(paths: &[String], out: &PathBuf, opts: GetOpts) -> Result<(), String> {
+    let GetOpts {
+        ip,
+        port,
+        storage,
+        keepalive,
+        sidecars,
+        verbose,
+    } = opts;
+    let paths: Vec<&str> = paths
+        .iter()
+        .map(|p| validate_get_path(p))
+        .collect::<Result<_, _>>()?;
+    let http = HttpClient::new(ip);
+    if verbose {
+        http.set_logger(|l| eprintln!("  {l}"));
+    }
+    // (path, store, known size)
+    let mut jobs: Vec<(String, u8, Option<u64>)> = Vec::new();
+    let mut not_found = 0usize;
+    let session = match storage {
+        Some(s) => {
+            warn_route(ip, port);
+            for p in &paths {
+                jobs.push((p.to_string(), s, http.head(&url_path(s, p))));
+            }
+            None
+        }
+        None => {
+            let mut sess = open_session(ip, port, verbose)?;
+            eprintln!("Looking up {} file(s) ...", paths.len());
+            let files = if let [p] = paths[..] {
+                sess.find_file(p)
+                    .map_err(session_err)?
+                    .into_iter()
+                    .collect()
+            } else {
+                list_pages(&mut sess, true).map_err(session_err)?
+            };
+            warn_if_unconfirmed(&sess);
+            let requested: Vec<String> = paths.iter().map(|p| p.to_string()).collect();
+            let (found, missing) = resolve_requested(&files, &requested);
+            for m in &missing {
+                eprintln!("not found anywhere in the camera's library: {m} (check it against `osmo ls --all`)");
+            }
+            not_found = missing.len();
+            for f in found {
+                jobs.push((
+                    f.path.clone(),
+                    f.storage,
+                    known_size(f, || http.head(&f.url_path())),
+                ));
+            }
+            Some(sess)
+        }
+    };
+    if jobs.is_empty() {
+        if let Some(mut s) = session {
+            s.close();
+        }
+        return Err("nothing to download".to_string());
+    }
+
+    std::fs::create_dir_all(out).map_err(|e| e.to_string())?;
+    let stop = Arc::new(AtomicBool::new(false));
+    let mut bg = None;
+    match session {
+        Some(mut s) if keepalive => {
+            let flag = stop.clone();
+            bg = Some(std::thread::spawn(move || {
+                while !flag.load(Ordering::Relaxed) {
+                    s.keepalive_tick();
+                }
+                s
+            }));
+        }
+        Some(mut s) => s.close(),
+        None => {}
+    }
+
+    let (mut saved, mut skipped, mut failed) = (0, 0, not_found);
+    let total = jobs.len();
+    for (n, (path, store, size)) in jobs.iter().enumerate() {
+        if total > 1 {
+            eprintln!("[{}/{}] {path}", n + 1, total);
+        }
+        match download_one(&http, out, *store, path, *size, sidecars) {
+            Ok(Outcome::Saved) => saved += 1,
+            Ok(Outcome::AlreadyComplete) => skipped += 1,
+            Err(e) => {
+                failed += 1;
+                eprintln!("failed {path}: {}", download_error_message(&e));
+                if matches!(e, osmo_core::http::DownloadError::Stalled { .. }) {
+                    let left = total - n - 1;
+                    if left > 0 {
+                        eprintln!("stopping: {left} file(s) not tried; the camera's WiFi is probably gone");
+                        failed += left;
+                    }
+                    break;
+                }
+            }
+        }
+    }
 
     if let Some(h) = bg {
         stop.store(true, Ordering::Relaxed);
@@ -546,9 +617,11 @@ fn get_cmd(path: &str, out: &PathBuf, opts: GetOpts) -> Result<(), String> {
             s.close();
         }
     }
-    match result.map_err(|e| download_error_message(&e))? {
-        Outcome::Saved => println!("Saved {}", dest.display()),
-        Outcome::AlreadyComplete => println!("Already complete: {}", dest.display()),
+    if total > 1 || not_found > 0 {
+        println!("{}", download_summary(saved, skipped, failed));
+    }
+    if failed > 0 {
+        return Err(format!("{failed} file(s) not downloaded"));
     }
     Ok(())
 }
@@ -598,7 +671,7 @@ fn run() -> Result<(), String> {
             page_size,
         } => ls_cmd(&ip, port, dump.as_ref(), all, page_size, cli.verbose),
         Cmd::Get {
-            path,
+            paths,
             out,
             ip,
             port,
@@ -606,7 +679,7 @@ fn run() -> Result<(), String> {
             no_keepalive,
             sidecars,
         } => get_cmd(
-            &path,
+            &paths,
             &out,
             GetOpts {
                 ip: &ip,

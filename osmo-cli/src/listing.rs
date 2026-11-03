@@ -196,6 +196,28 @@ pub fn find_file<'a>(files: &'a [CameraFile], path: &str) -> Option<&'a CameraFi
     files.iter().find(|f| f.path == path)
 }
 
+/// The listed files for the requested paths, in request order without repeats, plus the paths that are not listed.
+pub fn resolve_requested<'a>(
+    files: &'a [CameraFile],
+    requested: &[String],
+) -> (Vec<&'a CameraFile>, Vec<String>) {
+    let mut found: Vec<&CameraFile> = Vec::new();
+    let mut missing: Vec<String> = Vec::new();
+    for path in requested {
+        match find_file(files, path) {
+            Some(f) if !found.iter().any(|c| c.path == f.path) => found.push(f),
+            Some(_) => {}
+            None if !missing.contains(path) => missing.push(path.clone()),
+            None => {}
+        }
+    }
+    (found, missing)
+}
+
+pub fn download_summary(saved: usize, skipped: usize, failed: usize) -> String {
+    format!("{saved} saved, {skipped} already complete, {failed} failed")
+}
+
 /// Turn the paths the user typed into the exact listed files to delete, or refuse. All or nothing: one bad path
 /// refuses the whole request so a typo never leaves a partial deletion. Paths must match a listed path exactly
 /// (no globs, no directories), and the file must be safely deletable.
@@ -602,5 +624,37 @@ mod tests {
             Some("UTC".to_string())
         );
         assert_eq!(zone_from_link("/etc/something-else"), None);
+    }
+
+    #[test]
+    fn resolve_requested_keeps_order_dedupes_and_reports_missing() {
+        let files = vec![
+            deletable_file("DCIM/DJI_001/A_0001_D.JPG", 1),
+            deletable_file("DCIM/DJI_001/B_0002_D.JPG", 2),
+        ];
+        let req: Vec<String> = [
+            "DCIM/DJI_001/B_0002_D.JPG",
+            "DCIM/DJI_001/NOPE_0003_D.JPG",
+            "DCIM/DJI_001/A_0001_D.JPG",
+            "DCIM/DJI_001/B_0002_D.JPG",
+        ]
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
+        let (found, missing) = resolve_requested(&files, &req);
+        let names: Vec<&str> = found.iter().map(|f| f.path.as_str()).collect();
+        assert_eq!(
+            names,
+            ["DCIM/DJI_001/B_0002_D.JPG", "DCIM/DJI_001/A_0001_D.JPG"]
+        );
+        assert_eq!(missing, ["DCIM/DJI_001/NOPE_0003_D.JPG"]);
+    }
+
+    #[test]
+    fn download_summary_counts_every_outcome() {
+        assert_eq!(
+            download_summary(2, 1, 0),
+            "2 saved, 1 already complete, 0 failed"
+        );
     }
 }
