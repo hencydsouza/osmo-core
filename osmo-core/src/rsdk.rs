@@ -1,4 +1,7 @@
 //! DJI R-SDK framing and GPS payloads. Wire layouts are ported from Osmosis's RsdkProtocol.
+use crate::ble::{BleLink, LinkError};
+use std::collections::VecDeque;
+use std::time::{Duration, Instant};
 use thiserror::Error;
 
 #[derive(Debug, Error, PartialEq, Eq)]
@@ -232,4 +235,177 @@ pub fn gps_payload(fix: &GpsFix) -> Result<[u8; 48], Error> {
         chunk.copy_from_slice(&value);
     }
     Ok(p)
+}
+
+/// Stable identity used by the camera to remember R-SDK controller approval.
+#[derive(Clone, Copy)]
+pub struct Identity {
+    pub device_id: u32,
+    pub mac: [u8; 6],
+}
+
+#[derive(Debug, Error)]
+pub enum SessionError {
+    #[error(transparent)]
+    Protocol(#[from] Error),
+    #[error(transparent)]
+    Link(#[from] LinkError),
+    #[error("camera rejected the R-SDK connection")]
+    Rejected,
+    #[error("camera did not approve the R-SDK connection in time")]
+    Timeout,
+    #[error("operation interrupted")]
+    Cancelled,
+}
+
+/// Camera state received on an R-SDK status subscription.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CameraStatus {
+    pub mode: u8,
+    pub state: u8,
+    pub resolution: u8,
+    pub fps: u8,
+    pub record_seconds: u16,
+    pub battery_percent: Option<u8>,
+}
+
+fn camera_status(p: &[u8]) -> Option<CameraStatus> {
+    if p.len() < 7 {
+        return None;
+    }
+    Some(CameraStatus {
+        mode: p[0],
+        state: p[1],
+        resolution: p[2],
+        fps: p[3],
+        record_seconds: u16::from_le_bytes([p[5], p[6]]),
+        battery_percent: (p.len() > 7).then(|| p[p.len() - 1]).filter(|v| *v <= 100),
+    })
+}
+
+/// An approved R-SDK connection; caller supplies fresh GPS fixes and polls for camera messages.
+pub struct Session<'a> {
+    link: &'a mut dyn BleLink,
+    decoder: Reassembler,
+    pending: VecDeque<Frame>,
+    seq: u16,
+}
+
+impl Session<'_> {
+    fn next_seq(&mut self) -> u16 {
+        self.seq = self.seq.wrapping_add(1);
+        self.seq
+    }
+
+    fn send(
+        &mut self,
+        set: u8,
+        id: u8,
+        kind: u8,
+        payload: &[u8],
+        seq: u16,
+    ) -> Result<(), SessionError> {
+        let wire = Frame {
+            set,
+            id,
+            kind,
+            seq,
+            payload: payload.to_vec(),
+        }
+        .encode()?;
+        self.link.write_command(&wire)?;
+        Ok(())
+    }
+
+    fn receive(&mut self, wait: Duration) -> Result<Option<Frame>, SessionError> {
+        if let Some(frame) = self.pending.pop_front() {
+            return Ok(Some(frame));
+        }
+        if let Some(bytes) = self.link.recv(wait.min(Duration::from_millis(50)))? {
+            self.pending.extend(self.decoder.feed(&bytes));
+        }
+        Ok(self.pending.pop_front())
+    }
+
+    /// Send a GPS fix. The caller is responsible for ensuring it is fresh and supplying local wall time.
+    pub fn send_fix(&mut self, fix: &GpsFix) -> Result<(), SessionError> {
+        let payload = gps_payload(fix)?;
+        let seq = self.next_seq();
+        self.send(0, 0x17, 0, &payload, seq)
+    }
+
+    /// Receive a camera status push for up to `wait`. Other frames are consumed silently.
+    pub fn poll(&mut self, wait: Duration) -> Result<Option<CameraStatus>, SessionError> {
+        let end = Instant::now() + wait;
+        while Instant::now() < end {
+            if let Some(frame) = self.receive(end.saturating_duration_since(Instant::now()))? {
+                if (frame.set, frame.id) == (0x1d, 0x02) {
+                    if let Some(status) = camera_status(&frame.payload) {
+                        return Ok(Some(status));
+                    }
+                }
+            }
+        }
+        Ok(None)
+    }
+}
+
+/// Request R-SDK approval over an already-open BLE link. `verify_data` is the request's challenge value.
+/// Does not send GPS before the camera approves. Fixture-tested, not live-verified in osmo-core.
+pub fn connect<'a>(
+    link: &'a mut dyn BleLink,
+    identity: Identity,
+    verify_data: u16,
+    timeout: Duration,
+    cancelled: &dyn Fn() -> bool,
+) -> Result<Session<'a>, SessionError> {
+    if cancelled() {
+        return Err(SessionError::Cancelled);
+    }
+    let mut session = Session {
+        link,
+        decoder: Reassembler::default(),
+        pending: VecDeque::new(),
+        seq: 0,
+    };
+    let request = connection_request(identity.device_id, identity.mac, 0, verify_data);
+    let seq = session.next_seq();
+    session.send(0, 0x19, 2, &request, seq)?;
+    let end = Instant::now() + timeout;
+    loop {
+        if cancelled() {
+            return Err(SessionError::Cancelled);
+        }
+        if Instant::now() >= end {
+            return Err(SessionError::Timeout);
+        }
+        let Some(f) = session.receive(end.saturating_duration_since(Instant::now()))? else {
+            continue;
+        };
+        if (f.set, f.id) != (0, 0x19) {
+            continue;
+        }
+        if f.is_response() {
+            if f.payload.get(4).is_some_and(|&code| code != 0) {
+                return Err(SessionError::Rejected);
+            }
+            continue;
+        }
+        if f.payload.len() < 29 || f.payload[26] != 2 {
+            continue;
+        }
+        if u16::from_le_bytes([f.payload[27], f.payload[28]]) != 0 {
+            return Err(SessionError::Rejected);
+        }
+        session.send(
+            0,
+            0x19,
+            0x20,
+            &connection_response(identity.device_id, 0),
+            f.seq,
+        )?;
+        let seq = session.next_seq();
+        session.send(0x1d, 5, 0, &status_subscription(3, 20), seq)?;
+        return Ok(session);
+    }
 }
