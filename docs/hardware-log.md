@@ -146,3 +146,9 @@ multi-attempt download *with* keepalive (no cuts happened in either keepalive ru
 - The in-command check failed: it re-listed on the SAME session, the camera answered on a different channel and
   returned 0 files, so `rm` reported "cannot be confirmed" although the delete worked. Fixed: the check now runs on a
   fresh session, like `star`. Not yet re-verified live.
+
+## Time sync on the Action 4 (2026-11-03): camera refuses it
+
+- `osmo -v sync-time` registered fine, then the camera answered `0x00/0x6A` with status `0x00e0` (refused), the same code it gives `0x02/0x0C`.
+- Osmosis verified this command on a Nano only, and ignores the reply, so it would never have noticed a refusal.
+- Our registration steps and payload bytes match Osmosis's. Whether the camera clock changed anyway is not yet confirmed.
