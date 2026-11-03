@@ -7,7 +7,7 @@ use super::paging::{
 };
 use super::stream::{chunk_tally, count_media_paths, manifest_bytes, streams_ended};
 use super::transport::{Datagram, Transport, UdpPeer};
-use super::writes::{delete_payload, favourite_payload, WriteError};
+use super::writes::{delete_payload, favourite_payload, set_time_payload, WriteError};
 use crate::duml::commands::{set_pairing_pin, APP_DEVICE_INFO, DEFAULT_IDENTIFIER};
 use crate::duml::{find_reply, scan_frames};
 use crate::media::CameraFile;
@@ -715,6 +715,42 @@ impl<D: Datagram> CameraSession<D> {
         let result = self.write_reply(0x02, 0xBF, self.timing.write_reply_wait);
         self.log(format!("write: favourite reply {result:?}"));
         result
+    }
+
+    /// Handshake and register if this session has not yet; a no-op afterwards. `list_newest` does this itself
+    /// (and re-handshakes if called twice), so call `register` only before commands that need no listing.
+    pub fn register(&mut self) -> Result<(), SessionError> {
+        if self.registered_at.is_some() {
+            return Ok(());
+        }
+        self.open_and_register()
+    }
+
+    /// Set the camera's clock and time zone (`0x00/0x6A`, to the system receiver; the file receiver drops it).
+    /// Needs no playback. `NoReply` means sent but not acknowledged: check the camera's clock.
+    pub fn sync_time(
+        &mut self,
+        unix_secs: u64,
+        utc_offset_min: i16,
+        tz_id: &str,
+    ) -> Result<(), WriteError> {
+        if !tz_id.is_ascii() || tz_id.len() > 255 {
+            return Err(WriteError::BadZoneName);
+        }
+        if self.registered_at.is_none() {
+            return Err(WriteError::NotRegistered);
+        }
+        self.send(
+            0x00,
+            0x6A,
+            &set_time_payload(unix_secs, utc_offset_min, tz_id),
+            0x08,
+            1,
+        );
+        self.log(format!(
+            "write: time {unix_secs} UTC{utc_offset_min:+}min {tz_id}"
+        ));
+        self.write_reply(0x00, 0x6A, self.timing.write_reply_wait)
     }
 
     /// Delete files (`0x00/0x28`). IRREVERSIBLE. Every file is checked first (a verified handle nobody else

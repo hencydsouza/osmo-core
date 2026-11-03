@@ -34,6 +34,10 @@ BLE pair -> read WiFi credentials -> (user joins the camera's WiFi) -> TCP-7001 
 - **Un-favourite is not working on the Action 4.** `0x02/0xBF` with `on=00` is acknowledged (status 0) but the camera
   keeps the heart (confirmed on the camera's own screen, and by fresh listings). Osmosis never verified un-favourite on
   hardware, only that its payload differs from "on" by one byte. The right wire form is still unknown.
+- **Time sync:** `0x00/0x6A` `01 00 [unix secs u64-LE][UTC offset minutes i16-LE][len][IANA zone]` to receiver `0x28`
+  (system/RTC; the file receiver silently drops it). Osmosis sends it on every connect and does not wait for a reply.
+  Here it is an explicit `osmo sync-time`, so listing never changes the camera's clock. Session registration is lazy:
+  `list_newest` handshakes itself and a second call re-handshakes; use `register()` for commands that need no listing.
 - **Pairing identity:** 32 chars, minted once and persisted. A new one per run re-prompts on the camera.
 - **Datalink sequencing:** every packet carries `[ack = my previous seq][my seq]` in our own sequence space, and
   the 34-byte window ack echoes the peer's own cursors. Wrong values here silently drop writes while reads keep
