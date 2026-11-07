@@ -74,6 +74,13 @@ trait Host {
     fn wait_retry(&mut self);
 }
 
+/// After switching back, the Mac must hold an address outside the camera's 192.168.2.x network. This is the only
+/// check available when macOS hides the Wi-Fi name.
+#[cfg(any(target_os = "macos", test))]
+fn left_camera_network(address: Option<std::net::Ipv4Addr>) -> bool {
+    address.is_some_and(|a| a.octets()[..3] != [192, 168, 2])
+}
+
 #[cfg(any(target_os = "macos", test))]
 fn join_with_retry(
     host: &mut impl Host,
@@ -337,17 +344,26 @@ mod macos {
         }
 
         fn verify_restore(&mut self, ssid: &str) -> Result<(), String> {
-            for _ in 0..10 {
+            for _ in 0..30 {
                 match self.current_network() {
                     Some(actual) if actual == ssid => return Ok(()),
                     Some(_) => thread::sleep(Duration::from_secs(1)),
                     None => {
-                        eprintln!("Reconnect requested; macOS did not reveal the current Wi-Fi name to verify it.");
-                        return Ok(());
+                        let address = Command::new("ipconfig")
+                            .args(["getifaddr", &self.device])
+                            .output()
+                            .ok()
+                            .and_then(|o| String::from_utf8(o.stdout).ok())
+                            .and_then(|s| s.trim().parse::<Ipv4Addr>().ok());
+                        if left_camera_network(address) {
+                            eprintln!("macOS hides the Wi-Fi name; the Mac has left the camera network and holds {}.", address.map_or_else(String::new, |a| a.to_string()));
+                            return Ok(());
+                        }
+                        thread::sleep(Duration::from_secs(1));
                     }
                 }
             }
-            Err("macOS did not report the requested network".into())
+            Err("the Mac did not rejoin a network outside the camera's; reconnect using the macOS Wi-Fi menu".into())
         }
 
         fn check_interrupt(&mut self) -> Result<(), String> {
@@ -690,5 +706,13 @@ mod tests {
             .contains("interrupted"));
         assert_eq!(h.joins, ["Camera WiFi", "Home WiFi"]);
         assert!(h.calls.is_empty());
+    }
+
+    #[test]
+    fn leaving_the_camera_network_means_an_address_outside_192_168_2() {
+        use std::net::Ipv4Addr;
+        assert!(left_camera_network(Some(Ipv4Addr::new(192, 168, 29, 171))));
+        assert!(!left_camera_network(Some(Ipv4Addr::new(192, 168, 2, 7))));
+        assert!(!left_camera_network(None));
     }
 }

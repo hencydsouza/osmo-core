@@ -190,3 +190,10 @@ multi-attempt download *with* keepalive (no cuts happened in either keepalive ru
 - Undocumented in Osmosis: `0xD6` on start, and the `ee/03` push whose bytes change around the Wi-Fi step (`03 71...` -> `03 79...` -> `02 79...` -> `02 29...` -> `02 79...`).
 - Found while testing: the start status was never checked (any reply counted as started) - fixed; `ctrlc::try_set_handler` failed when SIGINT was ignored - fixed; the 6 s scan missed the camera often - now retried up to 3 times; the first rx trace filled its 200-line cap with repeated pushes - now logs changes only.
 - Open: whether the camera really joins the home network (the combined-band name contains `/`), or `D6` means something else. Next test: a plain 2.4 GHz phone-hotspot name via OSMO_RTMP_SSID / OSMO_RTMP_WIFI_PASSWORD.
+
+## Reliability pass (2026-11-07)
+
+- Every BLE camera lookup (`wifi`, `pair`, the helper's wake, `stream`, `gps`) now scans up to 3 times; BLE connect has a 15 s limit and 3 attempts (before: one 6 s scan, and a stalled connect could hang forever).
+- The helper's restore check now verifies by address (the Mac must hold an address outside 192.168.2.x) when macOS hides the Wi-Fi name, and waits up to 30 s. Before, it printed OK without checking.
+- Three back-to-back `with-wifi -- ls` runs failed because the camera's own hotspot "HencysAction4" was not broadcasting: a failed `stream` attempt leaves the camera joined to the home Wi-Fi with its hotspot off, and the BLE wake did not bring it back. A camera restart is needed. `stream` now says so when it fails. In run 1 the Mac needed longer than the old 10 s to get back on the home network; the new check reported that honestly (old code would have said OK).
+- Not re-verified: a clean `with-wifi -- ls` cycle after these changes (camera needs a restart first).

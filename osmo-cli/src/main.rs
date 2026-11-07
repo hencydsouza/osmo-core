@@ -827,8 +827,7 @@ fn camera_wifi_creds(
     device: Option<String>,
 ) -> Result<WifiCreds, String> {
     let wanted = device.or_else(config::last_device);
-    let (cams, _) = ble_btleplug::scan(rt, adapter, 6)?;
-    let cam = ble_btleplug::pick(cams, wanted.as_deref())?
+    let cam = ble_btleplug::find_camera(rt, adapter, wanted.as_deref(), 3, &|| false)?
         .ok_or("no matching camera found: is it on and awake? try `osmo scan`")?;
     eprintln!(
         "Connecting to {} ...",
@@ -973,7 +972,11 @@ fn stream_cmd(options: StreamOpts) -> Result<(), String> {
         },
         &|| interrupted.load(Ordering::SeqCst),
     )
-    .map_err(|e| e.to_string())?;
+    .map_err(|e| {
+        format!(
+            "{e}\nThe camera may now be on your Wi-Fi with its own hotspot off; restart the camera before using `osmo wifi`, `ls` or `get` again."
+        )
+    })?;
     remember_camera(&camera);
     eprintln!("Start acknowledged; check the RTMP server for video. Press Ctrl-C to stop.");
     let mut last_battery = None;

@@ -117,43 +117,81 @@ pub fn connect_rsdk(rt: Arc<Runtime>, found: &Found) -> Result<BtleplugLink, Str
     connect_inner(rt, found, false)
 }
 
+const CONNECT_ATTEMPTS: usize = 3;
+const CONNECT_TIMEOUT: Duration = Duration::from_secs(15);
+
+/// Connect with a time limit and a few retries: CoreBluetooth connects fail transiently, and a stalled one never
+/// returns on its own.
 fn connect_inner(
+    rt: Arc<Runtime>,
+    found: &Found,
+    arm_pairing: bool,
+) -> Result<BtleplugLink, String> {
+    let mut last = String::new();
+    for attempt in 1..=CONNECT_ATTEMPTS {
+        if attempt > 1 {
+            eprintln!(
+                "Bluetooth connection failed ({last}); retrying ({attempt}/{CONNECT_ATTEMPTS}) ..."
+            );
+            let _ = rt.block_on(found.peripheral.disconnect());
+            std::thread::sleep(Duration::from_secs(1));
+        }
+        match connect_once(rt.clone(), found, arm_pairing) {
+            Ok(link) => return Ok(link),
+            Err(e) => last = e,
+        }
+    }
+    Err(format!("{last} (after {CONNECT_ATTEMPTS} attempts)"))
+}
+
+fn connect_once(
     rt: Arc<Runtime>,
     found: &Found,
     arm_pairing: bool,
 ) -> Result<BtleplugLink, String> {
     let p = found.peripheral.clone();
     let (fff5_c, rx) = rt.block_on(async {
-        p.connect().await.map_err(bt_err)?;
-        p.discover_services().await.map_err(bt_err)?;
-        let chars = p.characteristics();
-        let find = |short: u16| {
-            chars
-                .iter()
-                .find(|c| c.uuid == uuid_from_u16(short))
-                .cloned()
-        };
-        let (Some(c4), Some(c5)) = (find(0xFFF4), find(0xFFF5)) else {
-            return Err("camera does not expose the fff4/fff5 control characteristics".to_string());
-        };
-        p.subscribe(&c4).await.map_err(bt_err)?;
-        p.subscribe(&c5).await.map_err(bt_err)?;
-        let mut stream = p.notifications().await.map_err(bt_err)?;
-        let (tx, rx) = mpsc::channel();
-        tokio::spawn(async move {
-            while let Some(n) = stream.next().await {
-                if tx.send(n.value).is_err() {
-                    break;
+        tokio::time::timeout(CONNECT_TIMEOUT, async {
+            p.connect().await.map_err(bt_err)?;
+            p.discover_services().await.map_err(bt_err)?;
+            let chars = p.characteristics();
+            let find = |short: u16| {
+                chars
+                    .iter()
+                    .find(|c| c.uuid == uuid_from_u16(short))
+                    .cloned()
+            };
+            let (Some(c4), Some(c5)) = (find(0xFFF4), find(0xFFF5)) else {
+                return Err(
+                    "camera does not expose the fff4/fff5 control characteristics".to_string(),
+                );
+            };
+            p.subscribe(&c4).await.map_err(bt_err)?;
+            p.subscribe(&c5).await.map_err(bt_err)?;
+            let mut stream = p.notifications().await.map_err(bt_err)?;
+            let (tx, rx) = mpsc::channel();
+            tokio::spawn(async move {
+                while let Some(n) = stream.next().await {
+                    if tx.send(n.value).is_err() {
+                        break;
+                    }
                 }
+            });
+            if arm_pairing {
+                // DUML pairing only: R-SDK has its own approval handshake.
+                p.write(&c4, &[0x01, 0x00], WriteType::WithResponse)
+                    .await
+                    .map_err(bt_err)?;
             }
-        });
-        if arm_pairing {
-            // DUML pairing only: R-SDK has its own approval handshake.
-            p.write(&c4, &[0x01, 0x00], WriteType::WithResponse)
-                .await
-                .map_err(bt_err)?;
-        }
-        Ok::<_, String>((c5, rx))
+            Ok::<_, String>((c5, rx))
+        })
+        .await
+        .map_err(|_| {
+            format!(
+                "Bluetooth connection timed out after {}s",
+                CONNECT_TIMEOUT.as_secs()
+            )
+        })?
     })?;
     Ok(BtleplugLink {
         rt,
