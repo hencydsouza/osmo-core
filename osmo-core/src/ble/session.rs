@@ -52,8 +52,37 @@ pub enum PairError {
     NotApproved,
     #[error("no reply from the camera to {0}")]
     NoReply(&'static str),
+    #[error("the camera says it is {0}, so it has no Wi-Fi hotspot to join: activate it with DJI's app first")]
+    NotActivated(&'static str),
     #[error(transparent)]
     Link(#[from] LinkError),
+}
+
+/// The camera announces its activation state about once a second until it is activated: `0x00/0x32`, payload starting
+/// `33 33`, state byte at offset 20 (DJI's `LctActivateState`).
+fn activation_state(f: &Frame) -> Option<u8> {
+    if (f.cmd_set(), f.cmd_id()) != (0x00, 0x32)
+        || f.payload.len() < 21
+        || f.payload[..2] != [0x33, 0x33]
+    {
+        return None;
+    }
+    Some(f.payload[20])
+}
+
+fn activation_name(state: u8) -> &'static str {
+    match state {
+        0 => "not activated",
+        1 => "activated",
+        2 => "uninitialized",
+        3 => "factory activated",
+        _ => "in an unknown activation state",
+    }
+}
+
+/// Only these two states mean the camera has never been activated and keeps its Wi-Fi off.
+fn is_not_activated(state: u8) -> bool {
+    matches!(state, 0 | 2)
 }
 
 struct Session<'a> {
@@ -70,6 +99,7 @@ struct Session<'a> {
     /// One line per frame received (battery pushes excluded), for diagnosing a camera that stops answering.
     rx_log: Vec<String>,
     rx_last: std::collections::HashMap<(u8, u8, u8), String>,
+    activation: Option<u8>,
 }
 
 impl<'a> Session<'a> {
@@ -87,6 +117,7 @@ impl<'a> Session<'a> {
             battery: None,
             rx_log: Vec::new(),
             rx_last: std::collections::HashMap::new(),
+            activation: None,
         }
     }
 
@@ -142,6 +173,9 @@ impl<'a> Session<'a> {
             return Ok(false);
         };
         for f in self.reasm.feed(&frag) {
+            if let Some(state) = activation_state(&f) {
+                self.activation = Some(state);
+            }
             if !(f.cmd_set() == 0x0D && f.cmd_id() == 0x02) && self.rx_log.len() < 200 {
                 let hex: String = f
                     .payload
@@ -303,11 +337,15 @@ pub fn pair_and_read_wifi(
     s.write(&session_5310(id))?;
 
     on_step("Reading WiFi credentials");
-    let ssid = s
-        .query(CMD_WIFI_SSID)?
-        .as_ref()
-        .and_then(parse_string)
-        .ok_or(PairError::NoReply("ssid"))?;
+    let ssid = match s.query(CMD_WIFI_SSID)?.as_ref().and_then(parse_string) {
+        Some(ssid) => ssid,
+        None => {
+            return Err(match s.activation.filter(|st| is_not_activated(*st)) {
+                Some(state) => PairError::NotActivated(activation_name(state)),
+                None => PairError::NoReply("ssid"),
+            })
+        }
+    };
     let password = s.query(CMD_WIFI_PASSWORD)?.as_ref().and_then(parse_string);
     let mac = s
         .query(CMD_WIFI_MAC)?
@@ -849,6 +887,60 @@ mod tests {
     #[test]
     fn missing_ssid_is_an_error() {
         let mut link = FakeLink::new().on(7, 0x45, vec![resp(7, 0x45, &[0, 1])]);
+        assert!(matches!(
+            pair_and_read_wifi(&mut link, &fast(), &mut |_| {}),
+            Err(PairError::NoReply("ssid"))
+        ));
+    }
+
+    fn activation_push(state: u8) -> Vec<u8> {
+        let mut p = vec![0u8; 21];
+        p[0] = 0x33;
+        p[1] = 0x33;
+        p[20] = state;
+        frame(0x00, 0x00, 0x32, 1, &p)
+    }
+
+    #[test]
+    fn activation_state_is_read_from_the_cameras_own_push() {
+        let f = Frame::decode(&activation_push(2)).unwrap();
+        assert_eq!(activation_state(&f), Some(2));
+        let other_cmd = Frame::decode(&frame(0x00, 0x00, 0x33, 1, &[0x33; 21])).unwrap();
+        assert_eq!(activation_state(&other_cmd), None);
+        let short = Frame::decode(&frame(0x00, 0x00, 0x32, 1, &[0x33, 0x33, 0])).unwrap();
+        assert_eq!(activation_state(&short), None);
+        let wrong_prefix = Frame::decode(&frame(0x00, 0x00, 0x32, 1, &[0u8; 21])).unwrap();
+        assert_eq!(activation_state(&wrong_prefix), None);
+    }
+
+    #[test]
+    fn activation_states_have_names_and_only_two_mean_not_activated() {
+        assert_eq!(activation_name(0), "not activated");
+        assert_eq!(activation_name(1), "activated");
+        assert_eq!(activation_name(2), "uninitialized");
+        assert_eq!(activation_name(3), "factory activated");
+        assert!(!is_not_activated(1) && !is_not_activated(3));
+        assert!(is_not_activated(0) && is_not_activated(2));
+    }
+
+    #[test]
+    fn an_unactivated_camera_is_named_instead_of_reported_as_silent() {
+        let mut link = FakeLink::new()
+            .on(7, 0x45, vec![resp(7, 0x45, &[0, 1])])
+            .inject(activation_push(0));
+        let err = pair_and_read_wifi(&mut link, &fast(), &mut |_| {}).unwrap_err();
+        assert!(
+            matches!(err, PairError::NotActivated("not activated")),
+            "{err:?}"
+        );
+        assert!(err.to_string().contains("activat"));
+    }
+
+    #[test]
+    fn an_activated_camera_that_stays_silent_is_still_a_plain_no_reply() {
+        let mut link = FakeLink::new()
+            .on(7, 0x45, vec![resp(7, 0x45, &[0, 1])])
+            .inject(activation_push(1));
         assert!(matches!(
             pair_and_read_wifi(&mut link, &fast(), &mut |_| {}),
             Err(PairError::NoReply("ssid"))
