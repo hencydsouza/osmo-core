@@ -249,6 +249,10 @@ enum Cmd {
         /// Also fetch the unlisted `.DNG` beside a still or `.WAV` beside a clip, when the camera has one.
         #[arg(long)]
         sidecars: bool,
+        /// Download each video's small low-res proxy instead of the full clip (the `.LRF` the camera keeps for
+        /// scrubbing). Photos and clips without a proxy are reported and skipped.
+        #[arg(long)]
+        proxy: bool,
     },
 }
 
@@ -609,6 +613,7 @@ struct GetOpts<'a> {
     storage: Option<u8>,
     keepalive: bool,
     sidecars: bool,
+    proxy: bool,
     verbose: bool,
 }
 
@@ -669,6 +674,7 @@ fn get_cmd(paths: &[String], out: &PathBuf, opts: GetOpts) -> Result<(), String>
         storage,
         keepalive,
         sidecars,
+        proxy,
         verbose,
     } = opts;
     let paths: Vec<&str> = paths
@@ -718,6 +724,19 @@ fn get_cmd(paths: &[String], out: &PathBuf, opts: GetOpts) -> Result<(), String>
             Some(sess)
         }
     };
+    if proxy {
+        let mut swapped = Vec::new();
+        for (path, store, _) in jobs {
+            match osmo_cli::listing::proxy_job(&path, store, |u| http.head(u)) {
+                Ok(job) => swapped.push(job),
+                Err(why) => {
+                    eprintln!("{why}");
+                    not_found += 1;
+                }
+            }
+        }
+        jobs = swapped;
+    }
     if jobs.is_empty() {
         if let Some(mut s) = session {
             s.close();
@@ -1218,6 +1237,7 @@ fn run() -> Result<(), String> {
             storage,
             no_keepalive,
             sidecars,
+            proxy,
         } => get_cmd(
             &paths,
             &out,
@@ -1227,6 +1247,7 @@ fn run() -> Result<(), String> {
                 storage,
                 keepalive: !no_keepalive,
                 sidecars,
+                proxy,
                 verbose: cli.verbose,
             },
         ),

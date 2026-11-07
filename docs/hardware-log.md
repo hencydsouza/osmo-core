@@ -214,3 +214,7 @@ multi-attempt download *with* keepalive (no cuts happened in either keepalive ru
 - But only 366,303 bytes arrived over the whole connection (16 video frames in the recording), then nothing for 2.5 minutes while the connection stayed open (measured with nettop on the receiver). At the configured 6000 kbit/s it should be tens of MB. The same tiny size was seen with the first successful run (no frame progress output).
 - The receiver was `ffmpeg -listen 1`, a minimal RTMP server that may not acknowledge the publisher the way real servers do, which would stall the camera. The link also showed many out-of-order bytes (66,697). Neither is proven as the cause.
 - Not yet shown: sustained video from the camera. Next test: a real RTMP server (e.g. MediaMTX) as the receiver.
+
+## Low-res proxy download (2026-11-07): live-verified
+
+- `with-wifi -- get --proxy` on a 52.5 MiB clip saved `DJI_20261101084646_0008_D.LRF` (6,118,975 bytes, 960x720 H.264 + AAC, readable by ffprobe); a photo in the same command was skipped with "no low-res proxy". Summary "1 saved, 0 already complete, 1 failed". Test file deleted afterwards.
