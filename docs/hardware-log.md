@@ -207,3 +207,10 @@ multi-attempt download *with* keepalive (no cuts happened in either keepalive ru
 - A second stream run immediately afterwards, without restarting the camera, failed earlier: the Wi-Fi join step returned status 0x01 (payload 01ff). So after one stream run the camera has to be restarted before the next. Not yet investigated (the stop command may not fully reset the camera).
 
 - Retest with .env updated to the hotspot name (identical to the working run's values: same name, no "/", 8-character password, both quoted and parsed correctly): on a freshly restarted camera the Wi-Fi join step returned status 0x01 (payload 01ff) and the stream stopped there. The working run used the same name and password through OSMO_RTMP_SSID / OSMO_RTMP_WIFI_PASSWORD. So the credentials are not the difference; either the hotspot was not joinable by the camera at that moment, or the camera's join is itself intermittent. `stream` now explains a join refusal. Unresolved.
+
+## Livestream data flow (2026-11-07): starts and connects, but little data arrives with an ffmpeg receiver
+
+- On the hotspot (Mac 192.168.137.66, camera 192.168.137.58) with .env credentials: join, configure and start all OK, `Start acknowledged`, the camera opened a TCP connection to the Mac's port 1935 and ffprobe read 1920x1080 H.264 + AAC from the recording.
+- But only 366,303 bytes arrived over the whole connection (16 video frames in the recording), then nothing for 2.5 minutes while the connection stayed open (measured with nettop on the receiver). At the configured 6000 kbit/s it should be tens of MB. The same tiny size was seen with the first successful run (no frame progress output).
+- The receiver was `ffmpeg -listen 1`, a minimal RTMP server that may not acknowledge the publisher the way real servers do, which would stall the camera. The link also showed many out-of-order bytes (66,697). Neither is proven as the cause.
+- Not yet shown: sustained video from the camera. Next test: a real RTMP server (e.g. MediaMTX) as the receiver.
