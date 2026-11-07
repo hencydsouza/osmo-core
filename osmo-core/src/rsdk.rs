@@ -263,8 +263,8 @@ pub enum SessionError {
     Protocol(#[from] Error),
     #[error(transparent)]
     Link(#[from] LinkError),
-    #[error("camera rejected the R-SDK connection")]
-    Rejected,
+    #[error("camera rejected the R-SDK connection ({0})")]
+    Rejected(String),
     #[error("camera did not approve the R-SDK connection in time")]
     Timeout,
     #[error("operation interrupted")]
@@ -418,16 +418,17 @@ pub fn connect<'a>(
             continue;
         }
         if f.is_response() {
-            if f.payload.get(4).is_some_and(|&code| code != 0) {
-                return Err(SessionError::Rejected);
+            if let Some(&code) = f.payload.get(4).filter(|&&c| c != 0) {
+                return Err(SessionError::Rejected(format!("response code {code}")));
             }
             continue;
         }
         if f.payload.len() < 29 || f.payload[26] != 2 {
             continue;
         }
-        if u16::from_le_bytes([f.payload[27], f.payload[28]]) != 0 {
-            return Err(SessionError::Rejected);
+        let verify = u16::from_le_bytes([f.payload[27], f.payload[28]]);
+        if verify != 0 {
+            return Err(SessionError::Rejected(format!("verify data {verify}")));
         }
         session.send(
             0,

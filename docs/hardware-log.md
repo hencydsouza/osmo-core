@@ -176,3 +176,9 @@ multi-attempt download *with* keepalive (no cuts happened in either keepalive ru
 - `cameras` / `cameras --scan`: remembered camera listed as `last`; scan marks it `nearby`. Selection among several cameras untested (only one exists).
 - `gps` with fake fixes: the camera rejected the R-SDK connection ("camera rejected the R-SDK connection"). Unknown whether the approval prompt was missed or the camera refuses. Untested beyond that.
 - `stream` to a local ffmpeg RTMP receiver: first run failed before touching the camera because `ctrlc::try_set_handler` refuses when SIGINT is ignored (background job); fixed with `set_handler`. Second run: pair, prepare, Wi-Fi join, stabilization, configure were accepted, then "no camera reply to stream start"; the receiver saw no connection. Not working yet; cause unknown.
+
+## Follow-up (2026-11-07): GPS and stream
+
+- Owner reports no approval prompt appeared on the camera during `gps`. The R-SDK rejection message now names the path (`response code N` or `verify data N`) so the next run shows which one fired.
+- Owner reports the camera stays on "preparing to livestream" after the failed `stream` run, and it no longer advertises over Bluetooth (`no matching camera found`). It needs a power cycle before retesting.
+- `stream -v` now prints each frame the camera sends (`rx set/cmd flags payload`, battery pushes excluded) so a stalled start shows where the camera stops answering. Credentials never appear in these lines.

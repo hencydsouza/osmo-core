@@ -140,7 +140,7 @@ fn rejection_and_timeout_never_send_gps() {
             Duration::from_millis(20),
             &|| false
         ),
-        Err(SessionError::Rejected)
+        Err(SessionError::Rejected(_))
     ));
     assert!(!cam.sent.iter().any(|f| f.id == 0x17));
     let mut cam = Camera::new();
