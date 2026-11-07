@@ -267,6 +267,138 @@ pub fn proxy_job(
     Ok((proxy, store, Some(size)))
 }
 
+/// `90`, `1:05`, `1:05.25` or `1:02:03` as milliseconds. Seconds may carry up to three decimals; with a colon,
+/// minutes and seconds must be under 60.
+pub fn parse_clock(text: &str) -> Result<u64, String> {
+    let bad =
+        || format!("not a time: {text:?} (use seconds, m:ss or h:mm:ss, e.g. 90, 1:30 or 1:30.5)");
+    let parts: Vec<&str> = text.split(':').collect();
+    if parts.is_empty() || parts.len() > 3 {
+        return Err(bad());
+    }
+    let digits = |s: &str| !s.is_empty() && s.bytes().all(|b| b.is_ascii_digit());
+    let (last, lead) = parts.split_last().ok_or_else(bad)?;
+    let (secs, frac) = match last.split_once('.') {
+        Some((s, f)) if digits(f) && f.len() <= 3 => (s, f),
+        Some(_) => return Err(bad()),
+        None => (*last, ""),
+    };
+    if !digits(secs) || !lead.iter().all(|p| digits(p)) {
+        return Err(bad());
+    }
+    let num = |s: &str| s.parse::<u64>().map_err(|_| bad());
+    let mut total = 0u64;
+    for (i, p) in lead.iter().enumerate() {
+        let v = num(p)?;
+        // The first part may exceed 59 (90:00); a middle minutes part may not.
+        if i > 0 && v >= 60 {
+            return Err(bad());
+        }
+        total = total * 60 + v;
+    }
+    let s = num(secs)?;
+    if parts.len() > 1 && s >= 60 {
+        return Err(bad());
+    }
+    total = total * 60 + s;
+    let millis = if frac.is_empty() {
+        0
+    } else {
+        num(frac)? * 10u64.pow(3 - frac.len() as u32)
+    };
+    Ok(total * 1000 + millis)
+}
+
+/// The start and end of a clip from two clock strings; the start must come first.
+pub fn trim_range(from: &str, to: &str) -> Result<(u64, u64), String> {
+    let (a, b) = (parse_clock(from)?, parse_clock(to)?);
+    if a >= b {
+        return Err(format!("the start ({from}) must be before the end ({to})"));
+    }
+    Ok((a, b))
+}
+
+/// Milliseconds as ffmpeg seconds: `10`, `25.5`, `65.25`.
+fn secs_text(ms: u64) -> String {
+    let (whole, frac) = (ms / 1000, ms % 1000);
+    if frac == 0 {
+        whole.to_string()
+    } else {
+        format!("{whole}.{frac:03}")
+            .trim_end_matches('0')
+            .to_string()
+    }
+}
+
+fn split_name(name: &str) -> (&str, &str) {
+    name.rsplit_once('.').unwrap_or((name, "mp4"))
+}
+
+pub fn clip_name(name: &str, from_ms: u64, to_ms: u64) -> String {
+    let (stem, ext) = split_name(name);
+    format!("{stem}_{}-{}.{ext}", secs_text(from_ms), secs_text(to_ms))
+}
+
+pub fn frame_name(name: &str, at_ms: u64) -> String {
+    format!("{}_at{}.jpg", split_name(name).0, secs_text(at_ms))
+}
+
+const FFMPEG_INPUT: [&str; 6] = [
+    "-reconnect",
+    "1",
+    "-reconnect_streamed",
+    "1",
+    "-reconnect_delay_max",
+    "5",
+];
+
+/// `ffmpeg` arguments to copy the streams between two times straight from the camera's HTTP address (no
+/// re-encoding, so the cut lands on the keyframe at or before the start). Never overwrites.
+pub fn trim_args(url: &str, from_ms: u64, to_ms: u64, out: &str) -> Vec<String> {
+    let mut a: Vec<String> = ["-hide_banner", "-loglevel", "error", "-stats", "-n"]
+        .iter()
+        .chain(FFMPEG_INPUT.iter())
+        .map(|s| s.to_string())
+        .collect();
+    a.extend(["-ss".into(), secs_text(from_ms), "-i".into(), url.into()]);
+    a.extend([
+        "-t".into(),
+        secs_text(to_ms - from_ms),
+        "-c".into(),
+        "copy".into(),
+        out.into(),
+    ]);
+    a
+}
+
+/// `ffmpeg` arguments to decode exactly one full-resolution frame at a time. Never overwrites.
+pub fn frame_args(url: &str, at_ms: u64, out: &str) -> Vec<String> {
+    let mut a: Vec<String> = ["-hide_banner", "-loglevel", "error", "-n"]
+        .iter()
+        .chain(FFMPEG_INPUT.iter())
+        .map(|s| s.to_string())
+        .collect();
+    a.extend(["-ss".into(), secs_text(at_ms), "-i".into(), url.into()]);
+    a.extend([
+        "-frames:v".into(),
+        "1".into(),
+        "-q:v".into(),
+        "2".into(),
+        out.into(),
+    ]);
+    a
+}
+
+/// A clip far shorter than asked for usually means the range ran past the end of the video.
+pub fn short_clip_warning(requested_ms: u64, actual_secs: f64) -> Option<String> {
+    let requested = requested_ms as f64 / 1000.0;
+    (actual_secs < requested * 0.5).then(|| {
+        format!(
+            "the saved clip is only {actual_secs:.1} s long but you asked for {requested:.0} s: the video probably ends before the range you gave"
+        )
+    })
+}
+
 pub fn download_summary(saved: usize, skipped: usize, failed: usize) -> String {
     format!("{saved} saved, {skipped} already complete, {failed} failed")
 }
@@ -771,5 +903,88 @@ mod tests {
         assert!(missing.contains("DJI_1_0008_D.MP4") && missing.contains("no low-res proxy"));
         let photo = proxy_job("DCIM/DJI_001/DJI_1_0009_D.JPG", 0, |_| Some(1)).unwrap_err();
         assert!(photo.contains("not a video") || photo.contains("no low-res proxy"));
+    }
+
+    #[test]
+    fn clock_times_parse_to_milliseconds_and_reject_nonsense() {
+        assert_eq!(parse_clock("90"), Ok(90_000));
+        assert_eq!(parse_clock("1:05"), Ok(65_000));
+        assert_eq!(parse_clock("1:05.25"), Ok(65_250));
+        assert_eq!(parse_clock("0:00:07.5"), Ok(7_500));
+        assert_eq!(parse_clock("1:02:03"), Ok(3_723_000));
+        for bad in [
+            "",
+            "abc",
+            "1:99",
+            "-5",
+            "1:2:3:4",
+            "1.2.3",
+            "1:05.1234",
+            "1e3",
+        ] {
+            assert!(parse_clock(bad).is_err(), "{bad}");
+        }
+    }
+
+    #[test]
+    fn trim_range_must_have_start_before_end() {
+        assert_eq!(trim_range("0:10", "0:25"), Ok((10_000, 25_000)));
+        assert!(trim_range("0:25", "0:10").unwrap_err().contains("before"));
+        assert!(trim_range("0:10", "0:10").is_err());
+    }
+
+    #[test]
+    fn clip_and_frame_names_keep_the_stem_and_say_what_was_cut() {
+        assert_eq!(
+            clip_name("DJI_20261101084646_0008_D.MP4", 10_000, 25_500),
+            "DJI_20261101084646_0008_D_10-25.5.MP4"
+        );
+        assert_eq!(
+            frame_name("DJI_20261101084646_0008_D.MP4", 65_250),
+            "DJI_20261101084646_0008_D_at65.25.jpg"
+        );
+    }
+
+    #[test]
+    fn ffmpeg_trim_args_copy_streams_between_the_two_times_without_overwriting() {
+        let a = trim_args(
+            "http://192.168.2.1/v2?storage=0&path=DCIM/a.MP4",
+            10_000,
+            25_500,
+            "out.MP4",
+        );
+        let joined = a.join(" ");
+        assert!(
+            joined.contains("-ss 10 -i http://192.168.2.1/v2?storage=0&path=DCIM/a.MP4"),
+            "{joined}"
+        );
+        assert!(joined.contains("-t 15.5"), "{joined}");
+        assert!(joined.contains("-c copy"), "{joined}");
+        assert!(joined.contains("-reconnect 1"), "{joined}");
+        assert_eq!(a.first().map(String::as_str), Some("-hide_banner"));
+        assert!(a.contains(&"-n".to_string()), "never overwrite");
+        assert_eq!(a.last().map(String::as_str), Some("out.MP4"));
+    }
+
+    #[test]
+    fn ffmpeg_frame_args_decode_exactly_one_frame_at_the_time() {
+        let a = frame_args("http://x/v2?p", 65_250, "f.jpg");
+        let joined = a.join(" ");
+        assert!(joined.contains("-ss 65.25 -i http://x/v2?p"), "{joined}");
+        assert!(joined.contains("-frames:v 1"), "{joined}");
+        assert_eq!(a.last().map(String::as_str), Some("f.jpg"));
+    }
+
+    #[test]
+    fn a_much_shorter_clip_than_requested_is_flagged_but_a_close_one_is_not() {
+        let w = short_clip_warning(10_000, 0.192).unwrap();
+        assert!(w.contains("0.2") && w.contains("10"), "{w}");
+        assert_eq!(short_clip_warning(10_000, 9.6), None);
+        assert_eq!(
+            short_clip_warning(10_000, 5.1),
+            None,
+            "keyframe cuts may run long or a little short"
+        );
+        assert!(short_clip_warning(10_000, 4.9).is_some());
     }
 }

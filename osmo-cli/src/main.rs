@@ -183,6 +183,40 @@ enum Cmd {
         #[arg(long)]
         port: Option<u16>,
     },
+    /// Save just a slice of a video, in original quality (no re-encoding; the cut lands on the keyframe at or before
+    /// the start). Needs `ffmpeg`. Times are seconds, m:ss or h:mm:ss.
+    Trim {
+        path: String,
+        /// Where the slice starts, e.g. 0:10.
+        #[arg(long)]
+        from: String,
+        /// Where the slice ends, e.g. 0:25.
+        #[arg(long)]
+        to: String,
+        /// Directory to save into.
+        #[arg(short, long, default_value = ".")]
+        out: PathBuf,
+        #[arg(long, default_value = CAMERA_IP)]
+        ip: String,
+        /// Datalink UDP port. Default: the one the saved camera's model speaks.
+        #[arg(long)]
+        port: Option<u16>,
+    },
+    /// Save one full-resolution frame of a video as a JPEG. Needs `ffmpeg`. Time is seconds, m:ss or h:mm:ss.
+    Frame {
+        path: String,
+        /// The moment to grab, e.g. 1:23.5.
+        #[arg(long)]
+        at: String,
+        /// Directory to save into.
+        #[arg(short, long, default_value = ".")]
+        out: PathBuf,
+        #[arg(long, default_value = CAMERA_IP)]
+        ip: String,
+        /// Datalink UDP port. Default: the one the saved camera's model speaks.
+        #[arg(long)]
+        port: Option<u16>,
+    },
     /// Delete files from the camera. IRREVERSIBLE. Paths are exactly as `osmo ls` prints them (no globs). Without
     /// --yes it only prints what it would delete. Only files in the newest listing can be deleted.
     Rm {
@@ -503,6 +537,126 @@ fn burst_cmd(path: &str, ip: &str, port: u16, verbose: bool) -> Result<(), Strin
     Ok(())
 }
 
+/// Run `ffmpeg` on a video straight from the camera's HTTP address while the datalink is held open. `name_for`
+/// turns the camera's file name into the output name; `args_for` builds the arguments from the input address and
+/// the output path.
+fn ffmpeg_on_camera(
+    path: &str,
+    ip: &str,
+    port: u16,
+    out_dir: &std::path::Path,
+    verbose: bool,
+    name_for: impl FnOnce(&str) -> String,
+    args_for: impl FnOnce(&str, &str) -> Vec<String>,
+) -> Result<std::path::PathBuf, String> {
+    let path = validate_get_path(path)?;
+    match std::process::Command::new("ffmpeg")
+        .arg("-version")
+        .output()
+    {
+        Ok(o) if o.status.success() => {}
+        _ => return Err(
+            "ffmpeg was not found: install it (for example `brew install ffmpeg`) and try again"
+                .into(),
+        ),
+    }
+    let mut sess = open_session(ip, port, verbose)?;
+    eprintln!("Looking up {path} ...");
+    let found = sess.find_file(path).map_err(session_err)?;
+    warn_if_unconfirmed(&sess);
+    let file = found.ok_or(
+        "not found anywhere in the camera's library: check the path against `osmo ls --all`",
+    )?;
+    if !file.is_video() {
+        return Err(format!("{path} is not a video"));
+    }
+    let url = format!("http://{ip}{}", url_path(file.storage, &file.path));
+    std::fs::create_dir_all(out_dir).map_err(|e| e.to_string())?;
+    let dest = out_dir.join(name_for(&file.name));
+    if dest.exists() {
+        return Err(format!(
+            "{} already exists; move it or choose another folder",
+            dest.display()
+        ));
+    }
+    let args = args_for(&url, &dest.to_string_lossy());
+    let held = hold_datalink(sess);
+    let status = std::process::Command::new("ffmpeg").args(&args).status();
+    release_datalink(held);
+    match status {
+        Ok(s) if s.success() && dest.exists() => Ok(dest),
+        Ok(s) => Err(format!("ffmpeg failed ({s}); nothing usable was saved")),
+        Err(e) => Err(format!("could not run ffmpeg: {e}")),
+    }
+}
+
+fn trim_cmd(
+    path: &str,
+    from: &str,
+    to: &str,
+    out: &std::path::Path,
+    ip: &str,
+    port: u16,
+    verbose: bool,
+) -> Result<(), String> {
+    let (from_ms, to_ms) = osmo_cli::listing::trim_range(from, to)?;
+    let dest = ffmpeg_on_camera(
+        path,
+        ip,
+        port,
+        out,
+        verbose,
+        |name| osmo_cli::listing::clip_name(name, from_ms, to_ms),
+        |url, dest| osmo_cli::listing::trim_args(url, from_ms, to_ms, dest),
+    )?;
+    println!("Saved {}", dest.display());
+    if let Some(secs) = probe_duration_secs(&dest) {
+        if let Some(w) = osmo_cli::listing::short_clip_warning(to_ms - from_ms, secs) {
+            eprintln!("warning: {w}");
+        }
+    }
+    Ok(())
+}
+
+/// The saved file's length via `ffprobe` (which ships with ffmpeg); `None` if it cannot be read.
+fn probe_duration_secs(file: &std::path::Path) -> Option<f64> {
+    let out = std::process::Command::new("ffprobe")
+        .args([
+            "-v",
+            "error",
+            "-show_entries",
+            "format=duration",
+            "-of",
+            "csv=p=0",
+        ])
+        .arg(file)
+        .output()
+        .ok()?;
+    String::from_utf8(out.stdout).ok()?.trim().parse().ok()
+}
+
+fn frame_cmd(
+    path: &str,
+    at: &str,
+    out: &std::path::Path,
+    ip: &str,
+    port: u16,
+    verbose: bool,
+) -> Result<(), String> {
+    let at_ms = osmo_cli::listing::parse_clock(at)?;
+    let dest = ffmpeg_on_camera(
+        path,
+        ip,
+        port,
+        out,
+        verbose,
+        |name| osmo_cli::listing::frame_name(name, at_ms),
+        |url, dest| osmo_cli::listing::frame_args(url, at_ms, dest),
+    )?;
+    println!("Saved {}", dest.display());
+    Ok(())
+}
+
 fn rm_cmd(paths: &[String], yes: bool, ip: &str, port: u16, verbose: bool) -> Result<(), String> {
     if paths.len() > 20 {
         return Err("at most 20 files can be deleted per command".to_string());
@@ -637,6 +791,32 @@ struct GetOpts<'a> {
     verbose: bool,
 }
 
+type Held = (
+    Arc<AtomicBool>,
+    std::thread::JoinHandle<CameraSession<osmo_core::datalink::UdpPeer>>,
+);
+
+/// Keep the datalink alive on a background thread: the camera puts its Wi-Fi to sleep when idle, and a long
+/// transfer has quiet gaps.
+fn hold_datalink(mut s: CameraSession<osmo_core::datalink::UdpPeer>) -> Held {
+    let stop = Arc::new(AtomicBool::new(false));
+    let flag = stop.clone();
+    let handle = std::thread::spawn(move || {
+        while !flag.load(Ordering::Relaxed) {
+            s.keepalive_tick();
+        }
+        s
+    });
+    (stop, handle)
+}
+
+fn release_datalink((stop, handle): Held) {
+    stop.store(true, Ordering::Relaxed);
+    if let Ok(mut s) = handle.join() {
+        s.close();
+    }
+}
+
 fn download_one(
     http: &HttpClient,
     out: &std::path::Path,
@@ -765,21 +945,14 @@ fn get_cmd(paths: &[String], out: &PathBuf, opts: GetOpts) -> Result<(), String>
     }
 
     std::fs::create_dir_all(out).map_err(|e| e.to_string())?;
-    let stop = Arc::new(AtomicBool::new(false));
-    let mut bg = None;
-    match session {
-        Some(mut s) if keepalive => {
-            let flag = stop.clone();
-            bg = Some(std::thread::spawn(move || {
-                while !flag.load(Ordering::Relaxed) {
-                    s.keepalive_tick();
-                }
-                s
-            }));
+    let held = match session {
+        Some(s) if keepalive => Some(hold_datalink(s)),
+        Some(mut s) => {
+            s.close();
+            None
         }
-        Some(mut s) => s.close(),
-        None => {}
-    }
+        None => None,
+    };
 
     let (mut saved, mut skipped, mut failed) = (0, 0, not_found);
     let total = jobs.len();
@@ -805,11 +978,8 @@ fn get_cmd(paths: &[String], out: &PathBuf, opts: GetOpts) -> Result<(), String>
         }
     }
 
-    if let Some(h) = bg {
-        stop.store(true, Ordering::Relaxed);
-        if let Ok(mut s) = h.join() {
-            s.close();
-        }
+    if let Some(h) = held {
+        release_datalink(h);
     }
     if total > 1 || not_found > 0 {
         println!("{}", download_summary(saved, skipped, failed));
@@ -1278,6 +1448,29 @@ fn run() -> Result<(), String> {
             port,
             storage,
         } => thumb_cmd(&path, &out, &ip, datalink_port(port), storage, cli.verbose),
+        Cmd::Trim {
+            path,
+            from,
+            to,
+            out,
+            ip,
+            port,
+        } => trim_cmd(
+            &path,
+            &from,
+            &to,
+            &out,
+            &ip,
+            datalink_port(port),
+            cli.verbose,
+        ),
+        Cmd::Frame {
+            path,
+            at,
+            out,
+            ip,
+            port,
+        } => frame_cmd(&path, &at, &out, &ip, datalink_port(port), cli.verbose),
         Cmd::SyncTime { ip, port } => sync_time_cmd(&ip, datalink_port(port), cli.verbose),
         Cmd::Marks { path, ip, port } => marks_cmd(&path, &ip, datalink_port(port), cli.verbose),
         Cmd::Burst { path, ip, port } => burst_cmd(&path, &ip, datalink_port(port), cli.verbose),
@@ -1322,6 +1515,8 @@ fn run() -> Result<(), String> {
                 | Cmd::Thumb { .. }
                 | Cmd::Star { .. }
                 | Cmd::Rm { .. }
+                | Cmd::Trim { .. }
+                | Cmd::Frame { .. }
                 | Cmd::SyncTime { .. }
                 | Cmd::Marks { .. }
                 | Cmd::Burst { .. }
