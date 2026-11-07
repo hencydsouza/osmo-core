@@ -973,8 +973,13 @@ fn stream_cmd(options: StreamOpts) -> Result<(), String> {
         &|| interrupted.load(Ordering::SeqCst),
     )
     .map_err(|e| {
+        let wifi_hint = if e.to_string().contains("Wi-Fi connection") {
+            "\nThe camera could not join that network: check its name and password, that the network is on (2.4 GHz is safest) and in range of the camera."
+        } else {
+            ""
+        };
         format!(
-            "{e}\nThe camera may now be on your Wi-Fi with its own hotspot off; restart the camera before using `osmo wifi`, `ls` or `get` again."
+            "{e}{wifi_hint}\nThe camera may now be on your Wi-Fi with its own hotspot off; restart the camera before using `osmo wifi`, `ls` or `get` again."
         )
     })?;
     remember_camera(&camera);
