@@ -892,9 +892,11 @@ struct StreamOpts {
     fps: StreamFps,
     stabilization: StreamStabilization,
     model: StreamModel,
+    verbose: bool,
 }
 
 fn stream_cmd(options: StreamOpts) -> Result<(), String> {
+    let verbose = options.verbose;
     let env =
         osmo_cli::stream::StreamEnv::load(std::path::Path::new(".env"), |k| std::env::var(k).ok())?;
     let resolution = match options.resolution {
@@ -963,7 +965,11 @@ fn stream_cmd(options: StreamOpts) -> Result<(), String> {
         &mut link,
         &pair,
         &settings,
-        &mut |step| eprintln!("{step} ..."),
+        &mut |step| match step.strip_prefix("rx ") {
+            Some(line) if verbose => eprintln!("  rx {line}"),
+            Some(_) => {}
+            None => eprintln!("{step} ..."),
+        },
         &|| interrupted.load(Ordering::SeqCst),
     )
     .map_err(|e| e.to_string())?;
@@ -1161,6 +1167,7 @@ fn run() -> Result<(), String> {
             fps,
             stabilization,
             model,
+            verbose: cli.verbose,
         }),
         Cmd::Gps { device } => gps_cmd(device),
         Cmd::Ls {

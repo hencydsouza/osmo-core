@@ -67,6 +67,8 @@ struct Session<'a> {
     last_keepalive: Instant,
     next_id: u16,
     battery: Option<u8>,
+    /// One line per frame received (battery pushes excluded), for diagnosing a camera that stops answering.
+    rx_log: Vec<String>,
 }
 
 impl<'a> Session<'a> {
@@ -82,6 +84,7 @@ impl<'a> Session<'a> {
             last_keepalive: Instant::now(),
             next_id: 0xA000,
             battery: None,
+            rx_log: Vec::new(),
         }
     }
 
@@ -137,6 +140,20 @@ impl<'a> Session<'a> {
             return Ok(false);
         };
         for f in self.reasm.feed(&frag) {
+            if !(f.cmd_set() == 0x0D && f.cmd_id() == 0x02) && self.rx_log.len() < 200 {
+                let hex: String = f
+                    .payload
+                    .iter()
+                    .take(24)
+                    .map(|b| format!("{b:02x}"))
+                    .collect();
+                self.rx_log.push(format!(
+                    "rx {:02x}/{:02x} flags={:02x} payload={hex}",
+                    f.cmd_set(),
+                    f.cmd_id(),
+                    f.flags()
+                ));
+            }
             if f.flags() == 0x40 {
                 // The camera drops the link if its own requests go unanswered.
                 let payload = if f.cmd_set() == 0x00 && f.cmd_id() == 0x81 {
@@ -424,6 +441,99 @@ pub fn start_livestream<'a>(
     start_livestream_cancellable(link, opts, config, on_step, &|| false)
 }
 
+fn stream_steps(
+    s: &mut Session<'_>,
+    wifi: &[u8],
+    configure: &[u8],
+    config: &StreamConfig<'_>,
+    on_step: &mut dyn FnMut(&str),
+    cancelled: &dyn Fn() -> bool,
+) -> Result<(), StreamError> {
+    s.wake_and_pair(on_step, cancelled)?;
+    on_step("Preparing stream");
+    let reply = stream_request(
+        s,
+        &rtmp::prepare_stage1(),
+        2,
+        0xe1,
+        "prepare stage 1",
+        2,
+        cancelled,
+    )?;
+    match reply.payload.first() {
+        Some(0) => {}
+        Some(&status) => {
+            return Err(StreamError::Rejected {
+                step: "prepare stage 1",
+                status,
+            })
+        }
+        None => return Err(StreamError::Invalid("empty prepare response")),
+    }
+    stream_request(
+        s,
+        &rtmp::prepare_stage2(),
+        2,
+        0x8e,
+        "prepare stage 2",
+        2,
+        cancelled,
+    )?;
+    on_step("Connecting camera to Wi-Fi");
+    let reply = stream_request(s, wifi, 7, 0x47, "Wi-Fi connection", 3, cancelled)?;
+    if reply.payload.len() < 2 {
+        return Err(StreamError::Invalid("short Wi-Fi response"));
+    }
+    if reply.payload[0] != 0 || reply.payload[1] != 0 {
+        return Err(StreamError::Rejected {
+            step: "Wi-Fi connection",
+            status: if reply.payload[0] != 0 {
+                reply.payload[0]
+            } else {
+                reply.payload[1]
+            },
+        });
+    }
+    if let Some(eis) = config.stabilization {
+        on_step("Setting stabilization");
+        stream_request(
+            s,
+            &rtmp::stabilization(eis, config.action5_pro),
+            2,
+            0x8e,
+            "stabilization",
+            2,
+            cancelled,
+        )?;
+    }
+    on_step("Configuring stream");
+    let reply = stream_request(s, configure, 8, 0x78, "stream configuration", 2, cancelled)?;
+    if let Some(&status) = reply.payload.first().filter(|&&v| v != 0) {
+        return Err(StreamError::Rejected {
+            step: "stream configuration",
+            status,
+        });
+    }
+    on_step("Starting stream");
+    if cancelled() {
+        return Err(StreamError::Cancelled);
+    }
+    if let Err(e) = stream_request(
+        s,
+        &rtmp::start_stream(),
+        2,
+        0x8e,
+        "stream start",
+        2,
+        cancelled,
+    ) {
+        // A lost acknowledgement does not prove the camera ignored start.
+        let _ = s.write(&rtmp::stop_stream());
+        return Err(e);
+    }
+    Ok(())
+}
+
 /// Like `start_livestream`, but checks `cancelled` during pairing and between setup requests.
 pub fn start_livestream_cancellable<'a>(
     link: &'a mut dyn BleLink,
@@ -460,96 +570,11 @@ pub fn start_livestream_cancellable<'a>(
         config.action5_pro,
     )?;
     let mut s = Session::new(link, opts);
-    s.wake_and_pair(on_step, cancelled)?;
-    on_step("Preparing stream");
-    let reply = stream_request(
-        &mut s,
-        &rtmp::prepare_stage1(),
-        2,
-        0xe1,
-        "prepare stage 1",
-        2,
-        cancelled,
-    )?;
-    match reply.payload.first() {
-        Some(0) => {}
-        Some(&status) => {
-            return Err(StreamError::Rejected {
-                step: "prepare stage 1",
-                status,
-            })
-        }
-        None => return Err(StreamError::Invalid("empty prepare response")),
+    let outcome = stream_steps(&mut s, &wifi, &configure, config, on_step, cancelled);
+    for line in s.rx_log.drain(..) {
+        on_step(&line);
     }
-    stream_request(
-        &mut s,
-        &rtmp::prepare_stage2(),
-        2,
-        0x8e,
-        "prepare stage 2",
-        2,
-        cancelled,
-    )?;
-    on_step("Connecting camera to Wi-Fi");
-    let reply = stream_request(&mut s, &wifi, 7, 0x47, "Wi-Fi connection", 3, cancelled)?;
-    if reply.payload.len() < 2 {
-        return Err(StreamError::Invalid("short Wi-Fi response"));
-    }
-    if reply.payload[0] != 0 || reply.payload[1] != 0 {
-        return Err(StreamError::Rejected {
-            step: "Wi-Fi connection",
-            status: if reply.payload[0] != 0 {
-                reply.payload[0]
-            } else {
-                reply.payload[1]
-            },
-        });
-    }
-    if let Some(eis) = config.stabilization {
-        on_step("Setting stabilization");
-        stream_request(
-            &mut s,
-            &rtmp::stabilization(eis, config.action5_pro),
-            2,
-            0x8e,
-            "stabilization",
-            2,
-            cancelled,
-        )?;
-    }
-    on_step("Configuring stream");
-    let reply = stream_request(
-        &mut s,
-        &configure,
-        8,
-        0x78,
-        "stream configuration",
-        2,
-        cancelled,
-    )?;
-    if let Some(&status) = reply.payload.first().filter(|&&v| v != 0) {
-        return Err(StreamError::Rejected {
-            step: "stream configuration",
-            status,
-        });
-    }
-    on_step("Starting stream");
-    if cancelled() {
-        return Err(StreamError::Cancelled);
-    }
-    if let Err(e) = stream_request(
-        &mut s,
-        &rtmp::start_stream(),
-        2,
-        0x8e,
-        "stream start",
-        2,
-        cancelled,
-    ) {
-        // A lost acknowledgement does not prove the camera ignored start.
-        let _ = s.write(&rtmp::stop_stream());
-        return Err(e);
-    }
+    outcome?;
     Ok(LiveStream {
         session: s,
         active: true,

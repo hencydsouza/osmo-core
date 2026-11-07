@@ -196,6 +196,25 @@ fn lost_start_reply_triggers_best_effort_stop() {
 }
 
 #[test]
+fn a_failed_start_reports_what_the_camera_did_send() {
+    let mut cam = Camera::new();
+    cam.silent_start = true;
+    let mut steps = Vec::new();
+    let options = opts();
+    let cfg = config();
+    let r = start_livestream(&mut cam, &options, &cfg, &mut |s| steps.push(s.to_string()));
+    assert!(r.is_err());
+    assert!(
+        steps.iter().any(|s| s.starts_with("rx 08/78 flags=")),
+        "the configure reply is traced: {steps:?}"
+    );
+    assert!(
+        !steps.iter().any(|s| s.contains("password")),
+        "a trace line never carries credentials"
+    );
+}
+
+#[test]
 fn invalid_inputs_are_rejected_before_any_camera_commands() {
     let mut cam = Camera::new();
     let mut c = config();
