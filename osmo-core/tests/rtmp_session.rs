@@ -15,6 +15,8 @@ struct Camera {
     stale_prepare: bool,
     cancel_on_start: Option<Arc<AtomicBool>>,
     wifi_status: [u8; 2],
+    /// Statuses for successive start requests; the last one repeats. Empty means 0 (started).
+    start_replies: VecDeque<u8>,
 }
 
 impl Camera {
@@ -27,6 +29,7 @@ impl Camera {
             stale_prepare: false,
             cancel_on_start: None,
             wifi_status: [0, 0],
+            start_replies: VecDeque::new(),
         }
     }
 }
@@ -48,6 +51,14 @@ impl BleLink for Camera {
                 (7, 0x47) => Some(self.wifi_status.to_vec()),
                 (2, 0x8e) if start && self.silent_start => None,
                 (2, 0x8e) if self.stale_prepare && f.payload == [0, 1, 0x1c, 0] => None,
+                (2, 0x8e) if start => {
+                    let status = if self.start_replies.len() > 1 {
+                        self.start_replies.pop_front()
+                    } else {
+                        self.start_replies.front().copied()
+                    };
+                    Some(vec![status.unwrap_or(0)])
+                }
                 (2, 0x8e) | (8, 0x78) => Some(vec![0]),
                 _ => None,
             };
@@ -271,4 +282,53 @@ fn cancellation_after_start_request_attempts_stop() {
     assert!(result.is_err());
     drop(result);
     assert!(cam.sent.iter().any(|f| f.payload == [1, 1, 0x1a, 0, 1, 2]));
+}
+
+fn start_frames(cam: &Camera) -> usize {
+    cam.sent
+        .iter()
+        .filter(|f| f.payload == [1, 1, 0x1a, 0, 1, 1])
+        .count()
+}
+
+#[test]
+fn start_retries_while_the_camera_says_d6_then_succeeds() {
+    let mut cam = Camera::new();
+    cam.start_replies = VecDeque::from([0xd6, 0xd6, 0]);
+    let (options, cfg) = (opts(), config());
+    let r = start_livestream(&mut cam, &options, &cfg, &mut |_| {});
+    assert!(r.is_ok(), "{:?}", r.err());
+    drop(r);
+    assert_eq!(start_frames(&cam), 3);
+}
+
+#[test]
+fn start_that_never_succeeds_is_an_error_and_sends_stop() {
+    let mut cam = Camera::new();
+    cam.start_replies = VecDeque::from([0xd6]);
+    let (options, cfg) = (opts(), config());
+    let err = start_livestream(&mut cam, &options, &cfg, &mut |_| {})
+        .err()
+        .map(|e| e.to_string());
+    assert!(
+        err.as_deref().is_some_and(|e| e.contains("0xd6")),
+        "{err:?}"
+    );
+    assert!(start_frames(&cam) > 1, "it retried before giving up");
+    assert!(cam.sent.iter().any(|f| f.payload == [1, 1, 0x1a, 0, 1, 2]));
+}
+
+#[test]
+fn start_with_another_error_code_fails_at_once_without_retrying() {
+    let mut cam = Camera::new();
+    cam.start_replies = VecDeque::from([0xe0]);
+    let (options, cfg) = (opts(), config());
+    let err = start_livestream(&mut cam, &options, &cfg, &mut |_| {})
+        .err()
+        .map(|e| e.to_string());
+    assert!(
+        err.as_deref().is_some_and(|e| e.contains("0xe0")),
+        "{err:?}"
+    );
+    assert_eq!(start_frames(&cam), 1);
 }

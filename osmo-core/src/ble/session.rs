@@ -515,23 +515,53 @@ fn stream_steps(
         });
     }
     on_step("Starting stream");
-    if cancelled() {
-        return Err(StreamError::Cancelled);
+    // The camera accepts the Wi-Fi join command at once but takes a few seconds to actually join; until then it
+    // answers start with 0xD6 (seen live on an Action 4). Retry that, give up on any other failure.
+    const START_TRIES: usize = 8;
+    const NOT_READY: u8 = 0xD6;
+    let pause = s.opts.step_timeout / 2;
+    let mut status = NOT_READY;
+    for attempt in 0..START_TRIES {
+        if cancelled() {
+            return Err(StreamError::Cancelled);
+        }
+        if attempt > 0 {
+            let end = Instant::now() + pause;
+            while Instant::now() < end {
+                s.pump(end.saturating_duration_since(Instant::now()))?;
+            }
+        }
+        let reply = match stream_request(
+            s,
+            &rtmp::start_stream(),
+            2,
+            0x8e,
+            "stream start",
+            2,
+            cancelled,
+        ) {
+            Ok(r) => r,
+            Err(e) => {
+                // A lost acknowledgement does not prove the camera ignored start.
+                let _ = s.write(&rtmp::stop_stream());
+                return Err(e);
+            }
+        };
+        match reply.payload.first() {
+            Some(0) => return Ok(()),
+            Some(&NOT_READY) => status = NOT_READY,
+            Some(&other) => {
+                status = other;
+                break;
+            }
+            None => return Err(StreamError::Invalid("empty start response")),
+        }
     }
-    if let Err(e) = stream_request(
-        s,
-        &rtmp::start_stream(),
-        2,
-        0x8e,
-        "stream start",
-        2,
-        cancelled,
-    ) {
-        // A lost acknowledgement does not prove the camera ignored start.
-        let _ = s.write(&rtmp::stop_stream());
-        return Err(e);
-    }
-    Ok(())
+    let _ = s.write(&rtmp::stop_stream());
+    Err(StreamError::Rejected {
+        step: "stream start",
+        status,
+    })
 }
 
 /// Like `start_livestream`, but checks `cancelled` during pairing and between setup requests.
