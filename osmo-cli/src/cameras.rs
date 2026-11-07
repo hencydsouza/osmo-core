@@ -12,6 +12,15 @@ pub struct SavedCamera {
     pub model_id: Option<u16>,
 }
 
+/// The datalink port: the `--port` flag if given, else the one the saved camera's model speaks, else 9004.
+pub fn datalink_port(flag: Option<u16>, saved: Option<&SavedCamera>) -> u16 {
+    flag.unwrap_or_else(|| {
+        saved.map_or(9004, |c| {
+            osmo_core::ble::resolve_profile(c.model_id, c.name.as_deref()).datalink_port
+        })
+    })
+}
+
 pub struct VisibleCamera {
     pub id: String,
     pub name: Option<String>,
@@ -266,5 +275,23 @@ mod tests {
             .any(|line| line.contains("id-3") && line.contains("new")));
         let offline = format_listing(&saved, None, None);
         assert!(!offline.contains("not seen"));
+    }
+
+    #[test]
+    fn datalink_port_prefers_the_flag_then_the_saved_cameras_model_then_9004() {
+        let xtra = SavedCamera {
+            id: "x".into(),
+            name: Some("XtraEdgePro-6E55".into()),
+            model_id: Some(0x0015),
+        };
+        let dji = SavedCamera {
+            id: "d".into(),
+            name: Some("OsmoAction4-1".into()),
+            model_id: Some(0x0014),
+        };
+        assert_eq!(datalink_port(Some(9999), Some(&xtra)), 9999);
+        assert_eq!(datalink_port(None, Some(&xtra)), 10004);
+        assert_eq!(datalink_port(None, Some(&dji)), 9004);
+        assert_eq!(datalink_port(None, None), 9004);
     }
 }
