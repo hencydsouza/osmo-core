@@ -38,6 +38,7 @@ BLE pair -> read WiFi credentials -> (user joins the camera's WiFi) -> TCP-7001 
   (system/RTC; the file receiver silently drops it). Osmosis sends it on every connect and does not wait for a reply.
   Here it is an explicit `osmo sync-time`, so listing never changes the camera's clock. Session registration is lazy:
   `list_newest` handshakes itself and a second call re-handshakes; use `register()` for commands that need no listing.
+- **Activation:** an unactivated camera keeps its Wi-Fi off and pushes `0x00/0x32` (payload `33 33 ...`, state byte at 20; 0 not activated, 1 activated, 2 uninitialized, 3 factory activated) about once a second. When the SSID query gets no answer and the camera has said 0 or 2, `wifi`/`pair` say so instead of "no reply". Fixture-tested only; the owner's camera is activated, so the warning itself has not been seen live.
 - **Pairing identity:** 32 chars, minted once and persisted. A new one per run re-prompts on the camera.
 - **Datalink sequencing:** every packet carries `[ack = my previous seq][my seq]` in our own sequence space, and
   the 34-byte window ack echoes the peer's own cursors. Wrong values here silently drop writes while reads keep
