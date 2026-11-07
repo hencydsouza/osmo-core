@@ -69,6 +69,7 @@ struct Session<'a> {
     battery: Option<u8>,
     /// One line per frame received (battery pushes excluded), for diagnosing a camera that stops answering.
     rx_log: Vec<String>,
+    rx_last: std::collections::HashMap<(u8, u8, u8), String>,
 }
 
 impl<'a> Session<'a> {
@@ -85,6 +86,7 @@ impl<'a> Session<'a> {
             next_id: 0xA000,
             battery: None,
             rx_log: Vec::new(),
+            rx_last: std::collections::HashMap::new(),
         }
     }
 
@@ -147,12 +149,14 @@ impl<'a> Session<'a> {
                     .take(24)
                     .map(|b| format!("{b:02x}"))
                     .collect();
-                self.rx_log.push(format!(
-                    "rx {:02x}/{:02x} flags={:02x} payload={hex}",
-                    f.cmd_set(),
-                    f.cmd_id(),
-                    f.flags()
-                ));
+                // Only changes are kept: the camera repeats the same status pushes many times a second.
+                let key = (f.cmd_set(), f.cmd_id(), f.flags());
+                if self.rx_last.insert(key, hex.clone()).as_deref() != Some(hex.as_str()) {
+                    self.rx_log.push(format!(
+                        "rx {:02x}/{:02x} flags={:02x} payload={hex}",
+                        key.0, key.1, key.2
+                    ));
+                }
             }
             if f.flags() == 0x40 {
                 // The camera drops the link if its own requests go unanswered.
