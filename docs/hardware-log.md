@@ -199,3 +199,9 @@ multi-attempt download *with* keepalive (no cuts happened in either keepalive ru
 - Not re-verified: a clean `with-wifi -- ls` cycle after these changes (camera needs a restart first).
 
 - After a camera restart: 3 of 3 back-to-back `with-wifi -- ls` cycles clean (wake, join, list, rejoin home, internet back each time). Then through the helper: 2-photo `get` (both saved, sizes 5.7 and 6.3 MiB), `thumb` (valid JPEG), `ls --starred` (the two starred files) all worked; `marks` still answers `0xe3`. One home rejoin hit macOS error -3967 ("tmpErr") and recovered on retry. Earlier a rejoin hit -3912 four times while the Mac recovered by itself; the helper now checks the Mac's address after a failed join and only reports failure if it is really not back on a network.
+
+## Livestream on a plain hotspot (2026-11-07): works
+
+- Stream to a local ffmpeg RTMP receiver over a phone/PC hotspot (Mac on 192.168.137.x; hotspot name and password passed from secure files, never logged): pair, prepare, Wi-Fi join, stabilization, configure and START all returned OK (start status 00, no D6). ffmpeg connected and parsed 1920x1080 H.264 + AAC 48 kHz stereo. Video frame count was not measured on that run (no progress output). Live-verified: the start sequence and the receiver connection.
+- Same code on the home network "Mohammad Huzair-4G/5G" returned D6 on every start and the receiver never connected. So D6 is most likely "the camera is not on the network yet / cannot join it", and the home network (combined-band name containing "/") is the probable cause. Not proven which property of that network the camera rejects.
+- A second stream run immediately afterwards, without restarting the camera, failed earlier: the Wi-Fi join step returned status 0x01 (payload 01ff). So after one stream run the camera has to be restarted before the next. Not yet investigated (the stop command may not fully reset the camera).
