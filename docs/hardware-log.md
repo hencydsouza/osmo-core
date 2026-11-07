@@ -222,3 +222,8 @@ multi-attempt download *with* keepalive (no cuts happened in either keepalive ru
 ## Per-model profiles (2026-11-07)
 
 - Full Osmosis model table ported (ids 0x06 through 0x22, Xtra rebadges, Pocket 3 single SD, 360 WPA3) and `--port` now defaults to the saved camera's profile with the TCP poke following the port. Live on the Action 4: `with-wifi -- -v ls` handshakes on the automatic port and lists 14 files. All other models are untested here (no hardware).
+
+## Trim and frame grab (2026-11-07): live-verified
+
+- `with-wifi -- trim <2 GiB clip> --from 0:05 --to 0:15`: saved a 10.2 s, 3840x2880 HEVC + AAC clip (138 MB) in about 5 s, fetching only the needed ranges. Cut on a 4 s clip (range past its end) produced a 0.19 s file with no ffmpeg error, which led to the short-clip warning.
+- `with-wifi -- frame <same clip> --at 0:08`: saved a 3840x2880 JPEG (708 KB), checked visually. Internet back after both. Test files deleted.
