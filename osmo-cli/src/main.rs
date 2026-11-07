@@ -946,12 +946,13 @@ fn stream_cmd(options: StreamOpts) -> Result<(), String> {
     let rt = Arc::new(Runtime::new().map_err(|e| e.to_string())?);
     let adapter = ble_btleplug::adapter(&rt)?;
     let wanted = options.device.or_else(config::last_device);
-    let (cams, _) = ble_btleplug::scan(&rt, &adapter, 6)?;
+    let found = ble_btleplug::find_camera(&rt, &adapter, wanted.as_deref(), 3, &|| {
+        interrupted.load(Ordering::SeqCst)
+    })?;
     if interrupted.load(Ordering::SeqCst) {
         return Err("interrupted before streaming".into());
     }
-    let camera = ble_btleplug::pick(cams, wanted.as_deref())?
-        .ok_or("no matching camera found: is it on and awake? try `osmo scan`")?;
+    let camera = found.ok_or("no matching camera found: is it on and awake? try `osmo scan`")?;
     eprintln!(
         "Connecting to {} ...",
         camera.name.as_deref().unwrap_or(&camera.id)
@@ -1021,12 +1022,13 @@ fn gps_cmd(device: Option<String>) -> Result<(), String> {
     let rt = Arc::new(Runtime::new().map_err(|e| e.to_string())?);
     let adapter = ble_btleplug::adapter(&rt)?;
     let wanted = device.or_else(config::last_device);
-    let (cams, _) = ble_btleplug::scan(&rt, &adapter, 6)?;
+    let found = ble_btleplug::find_camera(&rt, &adapter, wanted.as_deref(), 3, &|| {
+        interrupted.load(Ordering::SeqCst)
+    })?;
     if interrupted.load(Ordering::SeqCst) {
         return Err("interrupted before GPS connection".into());
     }
-    let camera = ble_btleplug::pick(cams, wanted.as_deref())?
-        .ok_or("no matching camera found: is it on and awake? try `osmo scan`")?;
+    let camera = found.ok_or("no matching camera found: is it on and awake? try `osmo scan`")?;
     eprintln!(
         "Connecting to {} ...",
         camera.name.as_deref().unwrap_or(&camera.id)

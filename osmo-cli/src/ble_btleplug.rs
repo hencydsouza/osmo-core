@@ -68,6 +68,30 @@ pub fn scan(rt: &Runtime, adapter: &Adapter, seconds: u64) -> Result<(Vec<Found>
     })
 }
 
+/// Scan until the wanted camera shows up, trying up to `attempts` times: a camera's Bluetooth adverts come and go,
+/// so one short scan can miss it. `stop` ends the search early (Ctrl-C).
+pub fn find_camera(
+    rt: &Runtime,
+    adapter: &Adapter,
+    wanted: Option<&str>,
+    attempts: usize,
+    stop: &dyn Fn() -> bool,
+) -> Result<Option<Found>, String> {
+    for attempt in 1..=attempts {
+        if stop() {
+            return Ok(None);
+        }
+        if attempt > 1 {
+            eprintln!("Camera not seen yet; scanning again ({attempt}/{attempts}) ...");
+        }
+        let (cams, _) = scan(rt, adapter, 6)?;
+        if let Some(found) = pick(cams, wanted)? {
+            return Ok(Some(found));
+        }
+    }
+    Ok(None)
+}
+
 pub fn pick(mut cams: Vec<Found>, wanted: Option<&str>) -> Result<Option<Found>, String> {
     let candidates: Vec<_> = cams
         .iter()
