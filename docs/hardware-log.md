@@ -182,3 +182,11 @@ multi-attempt download *with* keepalive (no cuts happened in either keepalive ru
 - Owner reports no approval prompt appeared on the camera during `gps`. The R-SDK rejection message now names the path (`response code N` or `verify data N`) so the next run shows which one fired.
 - Owner reports the camera stays on "preparing to livestream" after the failed `stream` run, and it no longer advertises over Bluetooth (`no matching camera found`). It needs a power cycle before retesting.
 - `stream -v` now prints each frame the camera sends (`rx set/cmd flags payload`, battery pushes excluded) so a stalled start shows where the camera stops answering. Credentials never appear in these lines.
+
+## Stream and GPS on the restarted camera (2026-11-07)
+
+- `gps` with 60 s of fake fixes: connected (the camera approved R-SDK), fixes sent, clean disconnect. The camera's side (whether it used the fixes) was not observable. Earlier rejection was while the camera was stuck after the failed stream run.
+- `stream` (home network "Mohammad Huzair-4G/5G", local ffmpeg RTMP receiver on the Mac): pair, prepare (`02/e1`=00), Wi-Fi join (`07/47`=0000), stabilization (`02/8e`=00) and configure (`08/78`=00) are all accepted, then every start (`02/8e`) is answered `0xD6`, over 8 tries about 4 s apart. The receiver never saw a connection. Reproduced on a freshly restarted camera.
+- Undocumented in Osmosis: `0xD6` on start, and the `ee/03` push whose bytes change around the Wi-Fi step (`03 71...` -> `03 79...` -> `02 79...` -> `02 29...` -> `02 79...`).
+- Found while testing: the start status was never checked (any reply counted as started) - fixed; `ctrlc::try_set_handler` failed when SIGINT was ignored - fixed; the 6 s scan missed the camera often - now retried up to 3 times; the first rx trace filled its 200-line cap with repeated pushes - now logs changes only.
+- Open: whether the camera really joins the home network (the combined-band name contains `/`), or `D6` means something else. Next test: a plain 2.4 GHz phone-hotspot name via OSMO_RTMP_SSID / OSMO_RTMP_WIFI_PASSWORD.
