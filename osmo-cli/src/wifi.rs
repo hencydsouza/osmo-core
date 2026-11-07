@@ -143,7 +143,12 @@ fn with_wifi(
         switched && !joined_camera && host.current_network().as_deref() == Some(original.as_str());
     let restore = if switched && !still_original {
         eprintln!("Reconnecting to {original} ...");
-        join_with_retry(host, &original, 4, false).and_then(|()| host.verify_restore(&original))
+        // macOS sometimes errors on the join (-3912) yet rejoins by itself a moment later, so a failed join
+        // is only a failure if the Mac is still not back on a network after waiting.
+        match join_with_retry(host, &original, 4, false) {
+            Ok(()) => host.verify_restore(&original),
+            Err(e) => host.verify_restore(&original).map_err(|_| e),
+        }
     } else {
         Ok(())
     };
@@ -491,6 +496,7 @@ mod tests {
         command_fails: bool,
         join_fails: bool,
         restore_fails: bool,
+        recovers_alone: bool,
         wait_interrupted: bool,
         camera_failures: usize,
         home_failures: usize,
@@ -562,7 +568,11 @@ mod tests {
             }
         }
         fn verify_restore(&mut self, _: &str) -> Result<(), String> {
-            Ok(())
+            if self.restore_fails && !self.recovers_alone {
+                Err("not back on a network".into())
+            } else {
+                Ok(())
+            }
         }
         fn check_interrupt(&mut self) -> Result<(), String> {
             if self.interrupt_on_retry && self.retry_waits > 0 {
@@ -584,6 +594,7 @@ mod tests {
             command_fails: false,
             join_fails: false,
             restore_fails: false,
+            recovers_alone: false,
             wait_interrupted: false,
             camera_failures: 0,
             home_failures: 0,
@@ -633,6 +644,14 @@ mod tests {
         assert!(h.joins.is_empty());
         with_wifi(&mut h, Some("Home WiFi"), &["ls".into()]).unwrap();
         assert_eq!(h.joins, ["Camera WiFi", "Home WiFi"]);
+    }
+
+    #[test]
+    fn a_join_error_is_forgiven_when_the_mac_is_back_on_its_network_anyway() {
+        let mut h = fake();
+        h.restore_fails = true;
+        h.recovers_alone = true;
+        with_wifi(&mut h, None, &["ls".into()]).unwrap();
     }
 
     #[test]
