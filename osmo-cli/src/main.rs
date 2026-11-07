@@ -137,8 +137,9 @@ enum Cmd {
     Ls {
         #[arg(long, default_value = CAMERA_IP)]
         ip: String,
-        #[arg(long, default_value_t = 9004)]
-        port: u16,
+        /// Datalink UDP port. Default: the one the saved camera's model speaks (9004 for DJI, 10004 for Xtra).
+        #[arg(long)]
+        port: Option<u16>,
         /// Also save the raw reply datagrams here, to reproduce a decode problem offline. Mostly file names and
         /// sizes, but also the camera's status pushes (device info, firmware, battery): review before sharing.
         #[arg(long)]
@@ -168,8 +169,9 @@ enum Cmd {
         path: String,
         #[arg(long, default_value = CAMERA_IP)]
         ip: String,
-        #[arg(long, default_value_t = 9004)]
-        port: u16,
+        /// Datalink UDP port. Default: the one the saved camera's model speaks (9004 for DJI, 10004 for Xtra).
+        #[arg(long)]
+        port: Option<u16>,
     },
     /// List the frames of a burst or interval group. Not yet verified on an Action 4.
     Burst {
@@ -177,8 +179,9 @@ enum Cmd {
         path: String,
         #[arg(long, default_value = CAMERA_IP)]
         ip: String,
-        #[arg(long, default_value_t = 9004)]
-        port: u16,
+        /// Datalink UDP port. Default: the one the saved camera's model speaks (9004 for DJI, 10004 for Xtra).
+        #[arg(long)]
+        port: Option<u16>,
     },
     /// Delete files from the camera. IRREVERSIBLE. Paths are exactly as `osmo ls` prints them (no globs). Without
     /// --yes it only prints what it would delete. Only files in the newest listing can be deleted.
@@ -190,15 +193,17 @@ enum Cmd {
         yes: bool,
         #[arg(long, default_value = CAMERA_IP)]
         ip: String,
-        #[arg(long, default_value_t = 9004)]
-        port: u16,
+        /// Datalink UDP port. Default: the one the saved camera's model speaks (9004 for DJI, 10004 for Xtra).
+        #[arg(long)]
+        port: Option<u16>,
     },
     /// Set the camera's clock and time zone from this computer's. NOT WORKING on an Action 4: it answers 'refused' (0xe0).
     SyncTime {
         #[arg(long, default_value = CAMERA_IP)]
         ip: String,
-        #[arg(long, default_value_t = 9004)]
-        port: u16,
+        /// Datalink UDP port. Default: the one the saved camera's model speaks (9004 for DJI, 10004 for Xtra).
+        #[arg(long)]
+        port: Option<u16>,
     },
     /// Save a file's thumbnail as an image. PATH is the camera path exactly as `osmo ls` prints it.
     Thumb {
@@ -208,8 +213,9 @@ enum Cmd {
         out: PathBuf,
         #[arg(long, default_value = CAMERA_IP)]
         ip: String,
-        #[arg(long, default_value_t = 9004)]
-        port: u16,
+        /// Datalink UDP port. Default: the one the saved camera's model speaks (9004 for DJI, 10004 for Xtra).
+        #[arg(long)]
+        port: Option<u16>,
         /// Skip the listing and use this store (0 = SD card, 1 = internal). This opens no datalink.
         #[arg(long)]
         storage: Option<u8>,
@@ -222,8 +228,9 @@ enum Cmd {
         off: bool,
         #[arg(long, default_value = CAMERA_IP)]
         ip: String,
-        #[arg(long, default_value_t = 9004)]
-        port: u16,
+        /// Datalink UDP port. Default: the one the saved camera's model speaks (9004 for DJI, 10004 for Xtra).
+        #[arg(long)]
+        port: Option<u16>,
     },
     /// Download files, resuming partial ones. Paths are exactly as `osmo ls` prints them.
     Get {
@@ -236,8 +243,9 @@ enum Cmd {
         out: PathBuf,
         #[arg(long, default_value = CAMERA_IP)]
         ip: String,
-        #[arg(long, default_value_t = 9004)]
-        port: u16,
+        /// Datalink UDP port. Default: the one the saved camera's model speaks (9004 for DJI, 10004 for Xtra).
+        #[arg(long)]
+        port: Option<u16>,
         /// Skip the listing and fetch by path from this store (0 = SD card, 1 = internal). This opens no datalink,
         /// so nothing holds the camera's WiFi up.
         #[arg(long)]
@@ -278,14 +286,26 @@ fn warn_route(ip: &str, port: u16) {
     }
 }
 
+/// The datalink port for this run: the flag, else the last-used camera's model profile, else 9004.
+fn datalink_port(flag: Option<u16>) -> u16 {
+    let last = config::last_device();
+    let saved = cameras::load().ok().and_then(|all| {
+        let id = last?;
+        all.into_iter().find(|c| c.id.eq_ignore_ascii_case(&id))
+    });
+    cameras::datalink_port(flag, saved.as_ref())
+}
+
 fn open_session(
     ip: &str,
     port: u16,
     verbose: bool,
 ) -> Result<CameraSession<osmo_core::datalink::UdpPeer>, String> {
     warn_route(ip, port);
+    // The line is either 9004 with the TCP poke or 10004 without it.
     let cfg = SessionConfig {
         port,
+        tcp_poke: port == 9004,
         ..SessionConfig::action4(ip)
     };
     let mut s = CameraSession::open(&cfg).map_err(session_err)?;
@@ -1217,7 +1237,7 @@ fn run() -> Result<(), String> {
             };
             ls_cmd(
                 &ip,
-                port,
+                datalink_port(port),
                 dump.as_ref(),
                 all,
                 page_size,
@@ -1243,7 +1263,7 @@ fn run() -> Result<(), String> {
             &out,
             GetOpts {
                 ip: &ip,
-                port,
+                port: datalink_port(port),
                 storage,
                 keepalive: !no_keepalive,
                 sidecars,
@@ -1257,22 +1277,22 @@ fn run() -> Result<(), String> {
             ip,
             port,
             storage,
-        } => thumb_cmd(&path, &out, &ip, port, storage, cli.verbose),
-        Cmd::SyncTime { ip, port } => sync_time_cmd(&ip, port, cli.verbose),
-        Cmd::Marks { path, ip, port } => marks_cmd(&path, &ip, port, cli.verbose),
-        Cmd::Burst { path, ip, port } => burst_cmd(&path, &ip, port, cli.verbose),
+        } => thumb_cmd(&path, &out, &ip, datalink_port(port), storage, cli.verbose),
+        Cmd::SyncTime { ip, port } => sync_time_cmd(&ip, datalink_port(port), cli.verbose),
+        Cmd::Marks { path, ip, port } => marks_cmd(&path, &ip, datalink_port(port), cli.verbose),
+        Cmd::Burst { path, ip, port } => burst_cmd(&path, &ip, datalink_port(port), cli.verbose),
         Cmd::Rm {
             paths,
             yes,
             ip,
             port,
-        } => rm_cmd(&paths, yes, &ip, port, cli.verbose),
+        } => rm_cmd(&paths, yes, &ip, datalink_port(port), cli.verbose),
         Cmd::Star {
             path,
             off,
             ip,
             port,
-        } => star_cmd(&path, !off, &ip, port, cli.verbose),
+        } => star_cmd(&path, !off, &ip, datalink_port(port), cli.verbose),
         ble_cmd => {
             let rt = Arc::new(Runtime::new().map_err(|e| e.to_string())?);
             let adapter = ble_btleplug::adapter(&rt)?;

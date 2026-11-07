@@ -218,3 +218,7 @@ multi-attempt download *with* keepalive (no cuts happened in either keepalive ru
 ## Low-res proxy download (2026-11-07): live-verified
 
 - `with-wifi -- get --proxy` on a 52.5 MiB clip saved `DJI_20261101084646_0008_D.LRF` (6,118,975 bytes, 960x720 H.264 + AAC, readable by ffprobe); a photo in the same command was skipped with "no low-res proxy". Summary "1 saved, 0 already complete, 1 failed". Test file deleted afterwards.
+
+## Per-model profiles (2026-11-07)
+
+- Full Osmosis model table ported (ids 0x06 through 0x22, Xtra rebadges, Pocket 3 single SD, 360 WPA3) and `--port` now defaults to the saved camera's profile with the TCP poke following the port. Live on the Action 4: `with-wifi -- -v ls` handshakes on the automatic port and lists 14 files. All other models are untested here (no hardware).
