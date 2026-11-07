@@ -168,3 +168,11 @@ multi-attempt download *with* keepalive (no cuts happened in either keepalive ru
 - `osmo with-wifi -- -v ls` woke the camera over BLE, joined its hotspot, listed 14 files, and requested reconnection to the home network. It retrieved the camera password via BLE and used the locally configured home password.
 - macOS hid the current SSID, so the helper could not verify reconnection by name. Afterward, the Wi-Fi interface's IP address and default gateway matched those observed before switching, consistent with returning to the home network but not conclusive proof of its SSID.
 - No listed file had a burst suffix. Burst expansion still requires a live test with a newly recorded burst.
+
+## Live checks of the 4 Nov features (2026-11-07), Action 4, camera battery 20%
+
+- `with-wifi -- -v ls`: woke, paired, joined the camera Wi-Fi, listed 14 files, rejoined home Wi-Fi (one join attempt failed, the retry worked; internet confirmed by ping). Live-verified. The helper's "reconnect OK" is NOT a real check on this Mac: macOS hides the SSID, so `verify_restore` returns OK unverified.
+- `with-wifi -- burst <normal photo>`: refused cleanly ("requires a numbered group lead"), nothing sent. A real burst is untested: the card has none.
+- `cameras` / `cameras --scan`: remembered camera listed as `last`; scan marks it `nearby`. Selection among several cameras untested (only one exists).
+- `gps` with fake fixes: the camera rejected the R-SDK connection ("camera rejected the R-SDK connection"). Unknown whether the approval prompt was missed or the camera refuses. Untested beyond that.
+- `stream` to a local ffmpeg RTMP receiver: first run failed before touching the camera because `ctrlc::try_set_handler` refuses when SIGINT is ignored (background job); fixed with `set_handler`. Second run: pair, prepare, Wi-Fi join, stabilization, configure were accepted, then "no camera reply to stream start"; the receiver saw no connection. Not working yet; cause unknown.
