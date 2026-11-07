@@ -939,7 +939,7 @@ fn stream_cmd(options: StreamOpts) -> Result<(), String> {
     .map_err(|e| e.to_string())?;
     let interrupted = Arc::new(AtomicBool::new(false));
     let flag = interrupted.clone();
-    ctrlc::try_set_handler(move || flag.store(true, Ordering::SeqCst))
+    ctrlc::set_handler(move || flag.store(true, Ordering::SeqCst))
         .map_err(|e| format!("could not install stop handler: {e}"))?;
     let rt = Arc::new(Runtime::new().map_err(|e| e.to_string())?);
     let adapter = ble_btleplug::adapter(&rt)?;
@@ -1008,7 +1008,7 @@ fn gps_local_time() -> Result<(u64, u32, u32), String> {
 fn gps_cmd(device: Option<String>) -> Result<(), String> {
     let interrupted = Arc::new(AtomicBool::new(false));
     let flag = interrupted.clone();
-    ctrlc::try_set_handler(move || flag.store(true, Ordering::SeqCst))
+    ctrlc::set_handler(move || flag.store(true, Ordering::SeqCst))
         .map_err(|e| format!("could not install stop handler: {e}"))?;
     let identity =
         config::load_or_create_rsdk_identity().map_err(|e| format!("R-SDK identity: {e}"))?;
