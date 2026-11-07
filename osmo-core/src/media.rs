@@ -73,6 +73,23 @@ impl CameraFile {
         }
     }
 
+    /// The low-res proxy clip the camera keeps beside a video, derived from the file-name family as Osmosis does:
+    /// `DJI_` clips have an `.LRF`, `CAM_` clips an unlisted `.XRF`. `None` for stills and unknown naming.
+    pub fn proxy_path(&self) -> Option<String> {
+        if !self.is_video() {
+            return None;
+        }
+        let ext = if self.name.starts_with("CAM_") {
+            "XRF"
+        } else if self.name.starts_with("DJI_") {
+            "LRF"
+        } else {
+            return None;
+        };
+        let (stem, _) = self.path.rsplit_once('.')?;
+        Some(format!("{stem}.{ext}"))
+    }
+
     /// A video (as opposed to a still), by its stored upper-case extension.
     pub fn is_video(&self) -> bool {
         matches!(self.ext.as_str(), "MP4" | "MOV" | "OSV" | "INSV")
@@ -193,5 +210,21 @@ mod tests {
             derive_thumb_path("DCIM/DJI_001/NOEXT"),
             "MISC/THM/DJI_001/NOEXT.scr"
         );
+    }
+
+    #[test]
+    fn proxy_path_follows_the_file_name_family() {
+        let dji = file("DCIM/DJI_001/DJI_20261101084646_0008_D.MP4", "MP4");
+        assert_eq!(
+            dji.proxy_path().as_deref(),
+            Some("DCIM/DJI_001/DJI_20261101084646_0008_D.LRF")
+        );
+        let cam = file("DCIM/100MEDIA/CAM_20261101_0001.MP4", "MP4");
+        assert_eq!(
+            cam.proxy_path().as_deref(),
+            Some("DCIM/100MEDIA/CAM_20261101_0001.XRF")
+        );
+        assert_eq!(file("DCIM/DJI_001/DJI_1_D.JPG", "JPG").proxy_path(), None);
+        assert_eq!(file("DCIM/x/GOPR0001.MP4", "MP4").proxy_path(), None);
     }
 }

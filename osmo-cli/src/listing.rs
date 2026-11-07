@@ -252,6 +252,21 @@ pub fn filter_files(files: &[CameraFile], kind: Kind, starred_only: bool) -> Vec
         .collect()
 }
 
+/// Turn a download job for a video into the job for its low-res proxy, or say why there is none. `head` asks the
+/// camera for a file's size by URL path; no answer means the camera does not have it.
+pub fn proxy_job(
+    path: &str,
+    store: u8,
+    head: impl FnOnce(&str) -> Option<u64>,
+) -> Result<(String, u8, Option<u64>), String> {
+    let proxy = file_from_path(store, path).proxy_path().ok_or_else(|| {
+        format!("{path}: no low-res proxy (not a video, or an unknown file-name family)")
+    })?;
+    let size = head(&osmo_core::media::url_path(store, &proxy))
+        .ok_or_else(|| format!("{path}: the camera has no low-res proxy for this clip"))?;
+    Ok((proxy, store, Some(size)))
+}
+
 pub fn download_summary(saved: usize, skipped: usize, failed: usize) -> String {
     format!("{saved} saved, {skipped} already complete, {failed} failed")
 }
@@ -739,5 +754,22 @@ mod tests {
     fn format_marks_prints_minutes_seconds_millis_or_none() {
         assert_eq!(format_marks(&[4000, 65_250]), "0:04.000\n1:05.250");
         assert_eq!(format_marks(&[]), "no highlight marks");
+    }
+
+    #[test]
+    fn proxy_job_maps_a_video_to_its_proxy_and_checks_the_camera_has_it() {
+        let ok = proxy_job("DCIM/DJI_001/DJI_1_0008_D.MP4", 0, |u| {
+            assert!(u.contains("DJI_1_0008_D.LRF"), "{u}");
+            Some(1234)
+        })
+        .unwrap();
+        assert_eq!(
+            ok,
+            ("DCIM/DJI_001/DJI_1_0008_D.LRF".to_string(), 0, Some(1234))
+        );
+        let missing = proxy_job("DCIM/DJI_001/DJI_1_0008_D.MP4", 0, |_| None).unwrap_err();
+        assert!(missing.contains("DJI_1_0008_D.MP4") && missing.contains("no low-res proxy"));
+        let photo = proxy_job("DCIM/DJI_001/DJI_1_0009_D.JPG", 0, |_| Some(1)).unwrap_err();
+        assert!(photo.contains("not a video") || photo.contains("no low-res proxy"));
     }
 }
