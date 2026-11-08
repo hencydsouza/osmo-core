@@ -88,7 +88,7 @@ data class BulkProgress(val index: Int, val count: Int, val done: Long, val tota
 class LibraryViewModel(private val repo: CameraRepository) : ViewModel() {
     private val _s = MutableStateFlow(LibraryState())
     val state = _s
-    suspend fun thumbnail(path: String) = repo.thumbnail(path)
+    suspend fun thumbnail(f: MediaFile) = repo.thumbnail(f)
 
     fun refresh() {
         _s.update { it.copy(loading = true, message = null) }
@@ -253,7 +253,7 @@ fun LibraryScreen(vm: LibraryViewModel, onOpen: (MediaFile) -> Unit, onLocal: ()
 @Composable
 private fun Tile(f: MediaFile, selected: Boolean, vm: LibraryViewModel, onClick: () -> Unit, onLong: () -> Unit) {
     val bmp by produceState<androidx.compose.ui.graphics.ImageBitmap?>(null, f.path) {
-        value = vm.thumbnail(f.path)?.let { b -> BitmapFactory.decodeByteArray(b, 0, b.size)?.asImageBitmap() }
+        value = vm.thumbnail(f)?.let { b -> BitmapFactory.decodeByteArray(b, 0, b.size)?.asImageBitmap() }
     }
     val scheme = MaterialTheme.colorScheme
     // Selection morphs the tile: corners grow and it shrinks inside its cell (spatial spring, expressive scheme).

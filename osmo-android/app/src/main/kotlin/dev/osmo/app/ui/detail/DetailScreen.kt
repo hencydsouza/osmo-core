@@ -7,6 +7,7 @@ import androidx.compose.foundation.Image
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
@@ -32,6 +33,37 @@ import androidx.compose.material3.SnackbarHostState
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
+import androidx.compose.foundation.background
+import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.aspectRatio
+import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.material.icons.filled.CameraAlt
+import androidx.compose.material.icons.filled.ContentCut
+import androidx.compose.material.icons.filled.Pause
+import androidx.compose.material.icons.filled.PlayArrow
+import androidx.compose.material3.AssistChip
+import androidx.compose.material3.FilledIconButton
+import androidx.compose.material3.FilledTonalButton
+import androidx.compose.material3.IconButtonDefaults
+import androidx.compose.material3.IconToggleButton
+import androidx.compose.material3.LoadingIndicator
+import androidx.compose.material3.RangeSlider
+import androidx.compose.material3.Surface
+import androidx.compose.runtime.DisposableEffect
+import androidx.compose.runtime.mutableLongStateOf
+import androidx.compose.ui.Alignment
+import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.ImageBitmap
+import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.viewinterop.AndroidView
+import androidx.media3.common.MediaItem
+import androidx.media3.common.PlaybackException
+import androidx.media3.common.Player
+import androidx.media3.exoplayer.ExoPlayer
+import androidx.media3.ui.PlayerView
+import kotlinx.coroutines.delay
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
@@ -71,7 +103,8 @@ class DetailViewModel(private val repo: CameraRepository, val file: MediaFile) :
     private val _s = MutableStateFlow(DetailState(starred = file.starred))
     val state = _s
     private var job: Job? = null
-    suspend fun thumbnail() = repo.thumbnail(file.path)
+    suspend fun thumbnail() = repo.thumbnail(file)
+    suspend fun streamUrl(proxy: Boolean) = repo.streamUrl(file, proxy)
 
     private fun run(label: String, block: suspend () -> String) {
         if (job?.isActive == true) return
@@ -133,41 +166,114 @@ fun DetailScreen(vm: DetailViewModel, onBack: () -> Unit) {
     val snack = remember { SnackbarHostState() }
     LaunchedEffect(s.message) { s.message?.takeIf { it.isNotEmpty() }?.let { snack.showSnackbar(it) } }
     LaunchedEffect(s.deleted) { if (s.deleted) onBack() }
-    val thumb by produceState<androidx.compose.ui.graphics.ImageBitmap?>(null) {
+    val thumb by produceState<ImageBitmap?>(null) {
         value = vm.thumbnail()?.let { b -> BitmapFactory.decodeByteArray(b, 0, b.size)?.asImageBitmap() }
     }
-    var from by remember { mutableStateOf("0") }
-    var to by remember { mutableStateOf("5") }
-    var at by remember { mutableStateOf("1") }
     val video = vm.file.kind == MediaKind.VIDEO
     val idle = s.busy == null
+    val scheme = MaterialTheme.colorScheme
+    val ctx = LocalContext.current
+
+    // Streaming preview: the camera's low-res proxy first (small, plays over Wi-Fi), the original if there is none.
+    var player by remember { mutableStateOf<ExoPlayer?>(null) }
+    var playerError by remember { mutableStateOf<String?>(null) }
+    var durationMs by remember { mutableLongStateOf(0L) }
+    var positionMs by remember { mutableLongStateOf(0L) }
+    var playing by remember { mutableStateOf(false) }
+    var triedOriginal by remember { mutableStateOf(false) }
+    var range by remember { mutableStateOf(0f..1f) }
+
+    if (video) {
+        LaunchedEffect(Unit) {
+            val p = ExoPlayer.Builder(ctx).build()
+            p.addListener(object : Player.Listener {
+                override fun onIsPlayingChanged(isPlaying: Boolean) { playing = isPlaying }
+                override fun onPlaybackStateChanged(state: Int) {
+                    if (state == Player.STATE_READY && durationMs == 0L) {
+                        durationMs = p.duration.coerceAtLeast(0)
+                        range = 0f..1f
+                    }
+                }
+                override fun onPlayerError(error: PlaybackException) {
+                    if (!triedOriginal) {
+                        triedOriginal = true
+                    } else playerError = "Can\u2019t play this clip here. You can still download it."
+                }
+            })
+            p.setMediaItem(MediaItem.fromUri(vm.streamUrl(proxy = true)))
+            p.prepare()
+            player = p
+        }
+        LaunchedEffect(triedOriginal, player) {
+            val p = player ?: return@LaunchedEffect
+            if (triedOriginal) { p.setMediaItem(MediaItem.fromUri(vm.streamUrl(proxy = false))); p.prepare() }
+        }
+        LaunchedEffect(player) { while (true) { player?.let { positionMs = it.currentPosition }; delay(200) } }
+        DisposableEffect(Unit) { onDispose { player?.release() } }
+        // Camera work and playback share one Wi-Fi link: pause while a transfer runs.
+        LaunchedEffect(s.busy) { if (s.busy != null) player?.pause() }
+    }
 
     s.deletePlan?.takeIf { it.isNotEmpty() }?.let { DeleteDialog(it, vm::confirmDelete, vm::cancelDelete) }
 
     Scaffold(
+        containerColor = scheme.surface,
         snackbarHost = { SnackbarHost(snack) },
         topBar = {
             TopAppBar(
-                title = { Text(vm.file.path.substringAfterLast('/')) },
+                title = {},
                 navigationIcon = { IconButton(onClick = onBack) { Icon(Icons.AutoMirrored.Filled.ArrowBack, "Back") } },
                 actions = {
-                    IconButton(onClick = vm::planDelete, enabled = idle) { Icon(Icons.Filled.Delete, "Delete from camera") }
-                    IconButton(onClick = vm::toggleStar, enabled = idle) {
-                        Icon(if (s.starred) Icons.Filled.Star else Icons.Filled.StarBorder, if (s.starred) "Remove favourite" else "Favourite")
+                    IconToggleButton(checked = s.starred, onCheckedChange = { vm.toggleStar() }, enabled = idle) {
+                        Icon(if (s.starred) Icons.Filled.Star else Icons.Filled.StarBorder, if (s.starred) "Remove favourite" else "Favourite",
+                            tint = if (s.starred) scheme.tertiary else scheme.onSurfaceVariant)
                     }
+                    IconButton(onClick = vm::planDelete, enabled = idle) { Icon(Icons.Filled.Delete, "Delete from camera") }
                 },
             )
         },
     ) { pad ->
-        Column(
-            Modifier.padding(pad).padding(16.dp).verticalScroll(rememberScrollState()),
-            verticalArrangement = Arrangement.spacedBy(16.dp),
-        ) {
-            thumb?.let { Image(it, null, Modifier.fillMaxWidth().heightIn(max = 280.dp), contentScale = ContentScale.Fit) }
-            Text("${vm.file.sizeBytes.toLong() / 1_000_000} MB · ${if (video) "video" else "photo"}", style = MaterialTheme.typography.bodyMedium)
+        Column(Modifier.padding(pad).verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(20.dp)) {
+            // Hero: edge-to-edge media, rounded bottom (shape: my design decision, not in M3).
+            Box(
+                Modifier.fillMaxWidth().padding(horizontal = 16.dp).aspectRatio(16f / 9f)
+                    .clip(RoundedCornerShape(28.dp)).background(scheme.surfaceContainerHigh),
+                contentAlignment = Alignment.Center,
+            ) {
+                val p = player
+                if (video && p != null && playerError == null) {
+                    AndroidView(
+                        factory = { c -> PlayerView(c).apply { player = p; useController = false; setShutterBackgroundColor(android.graphics.Color.TRANSPARENT) } },
+                        update = { it.player = p }, modifier = Modifier.fillMaxSize(),
+                    )
+                }
+                if (!(video && playing) || playerError != null) {
+                    thumb?.let { Image(it, null, Modifier.fillMaxSize(), contentScale = ContentScale.Crop) }
+                }
+                if (video && playerError == null) {
+                    FilledIconButton(
+                        onClick = { player?.let { if (it.isPlaying) it.pause() else it.play() } },
+                        Modifier.size(72.dp),
+                        colors = IconButtonDefaults.filledIconButtonColors(containerColor = scheme.primaryContainer.copy(alpha = if (playing) 0.55f else 1f), contentColor = scheme.onPrimaryContainer),
+                    ) { Icon(if (playing) Icons.Filled.Pause else Icons.Filled.PlayArrow, if (playing) "Pause" else "Play", Modifier.size(36.dp)) }
+                    if (player != null && durationMs == 0L && !playing) {
+                        LoadingIndicator(Modifier.align(Alignment.BottomEnd).padding(12.dp).size(32.dp))
+                    }
+                }
+            }
+            playerError?.let { Text(it, Modifier.padding(horizontal = 24.dp), color = scheme.error, style = MaterialTheme.typography.bodyMedium) }
+
+            Column(Modifier.padding(horizontal = 24.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
+                Text(vm.file.path.substringAfterLast('/'), style = MaterialTheme.typography.titleLarge, maxLines = 2)
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    AssistChip(onClick = {}, label = { Text(if (video) "Video" else "Photo") })
+                    AssistChip(onClick = {}, label = { Text(if (vm.file.sizeBytes.toLong() >= 1_000_000_000L) "%.2f GB".format(vm.file.sizeBytes.toLong() / 1e9) else "${vm.file.sizeBytes.toLong() / 1_000_000} MB") })
+                    if (video && durationMs > 0) AssistChip(onClick = {}, label = { Text(clock(durationMs)) })
+                }
+            }
 
             s.busy?.let { label ->
-                Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                Column(Modifier.padding(horizontal = 24.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
                     Text(label, style = MaterialTheme.typography.titleSmall)
                     if (s.total > 0) LinearWavyProgressIndicator(progress = { s.done.toFloat() / s.total }, Modifier.fillMaxWidth())
                     else LinearWavyProgressIndicator(Modifier.fillMaxWidth())
@@ -175,38 +281,51 @@ fun DetailScreen(vm: DetailViewModel, onBack: () -> Unit) {
                 }
             }
 
-            Button(onClick = vm::download, enabled = idle, modifier = Modifier.fillMaxWidth()) {
+            Button(
+                onClick = vm::download, enabled = idle,
+                modifier = Modifier.padding(horizontal = 24.dp).fillMaxWidth().heightIn(min = 64.dp), shape = MaterialTheme.shapes.extraLarge,
+            ) {
                 Icon(Icons.Filled.Download, null)
-                Text("Download", Modifier.padding(start = 8.dp))
+                Text("Download to phone", Modifier.padding(start = 12.dp), style = MaterialTheme.typography.titleMedium)
             }
 
-            if (video) {
-                Text("Trim (no re-encode)", style = MaterialTheme.typography.titleMedium)
-                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    SecondsField("From (s)", from, { from = it }, Modifier.weight(1f))
-                    SecondsField("To (s)", to, { to = it }, Modifier.weight(1f))
-                }
-                OutlinedButton(
-                    onClick = { vm.trim(from.toDoubleOrNull() ?: 0.0, to.toDoubleOrNull() ?: 0.0) },
-                    enabled = idle && (from.toDoubleOrNull() ?: -1.0) >= 0 && (to.toDoubleOrNull() ?: 0.0) > (from.toDoubleOrNull() ?: 0.0),
-                ) { Text("Save trimmed clip") }
-
-                Text("Still frame", style = MaterialTheme.typography.titleMedium)
-                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    SecondsField("At (s)", at, { at = it }, Modifier.weight(1f))
-                    OutlinedButton(onClick = { vm.frame(at.toDoubleOrNull() ?: 0.0) }, enabled = idle && at.toDoubleOrNull() != null) { Text("Save frame") }
+            if (video && durationMs > 0) {
+                val total = durationMs / 1000f
+                val fromS = range.start * total
+                val toS = range.endInclusive * total
+                Surface(Modifier.padding(horizontal = 16.dp).fillMaxWidth(), shape = RoundedCornerShape(28.dp), color = scheme.surfaceContainerLow) {
+                    Column(Modifier.padding(20.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                        Text("Trim", style = MaterialTheme.typography.titleMedium)
+                        Text("Cuts at the nearest earlier keyframe. No re-encode, so it's fast and lossless.", style = MaterialTheme.typography.bodyMedium, color = scheme.onSurfaceVariant)
+                        RangeSlider(
+                            value = range, onValueChange = { range = it; player?.seekTo((it.start * durationMs).toLong()) },
+                            enabled = idle,
+                        )
+                        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
+                            Text(clock((fromS * 1000).toLong()), style = MaterialTheme.typography.labelLarge)
+                            Text("${"%.1f".format(toS - fromS)} s", style = MaterialTheme.typography.labelLarge, color = scheme.primary)
+                            Text(clock((toS * 1000).toLong()), style = MaterialTheme.typography.labelLarge)
+                        }
+                        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                            FilledTonalButton(
+                                onClick = { vm.trim(fromS.toDouble(), toS.toDouble()) },
+                                enabled = idle && toS - fromS >= 0.5f, modifier = Modifier.weight(1f),
+                            ) { Icon(Icons.Filled.ContentCut, null); Text("Save clip", Modifier.padding(start = 8.dp)) }
+                            OutlinedButton(
+                                onClick = { vm.frame((positionMs / 1000.0)) }, enabled = idle, modifier = Modifier.weight(1f),
+                            ) { Icon(Icons.Filled.CameraAlt, null); Text("Frame here", Modifier.padding(start = 8.dp)) }
+                        }
+                    }
                 }
             }
+            Box(Modifier.height(24.dp))
         }
     }
 }
 
-@Composable
-private fun SecondsField(label: String, value: String, onChange: (String) -> Unit, modifier: Modifier) {
-    OutlinedTextField(
-        value, onChange, modifier, label = { Text(label) }, singleLine = true,
-        keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal),
-    )
+private fun clock(ms: Long): String {
+    val s = ms / 1000
+    return "%d:%02d".format(s / 60, s % 60)
 }
 
 @Composable

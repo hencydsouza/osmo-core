@@ -38,6 +38,8 @@ dependencies {
     implementation("androidx.navigation3:navigation3-runtime:1.2.1")
     implementation("androidx.navigation3:navigation3-ui:1.2.1")
     implementation("androidx.core:core-splashscreen:1.2.0")
+    implementation("androidx.media3:media3-exoplayer:1.8.0")
+    implementation("androidx.media3:media3-ui:1.8.0")
     implementation("org.jetbrains.kotlinx:kotlinx-serialization-json:1.12.0")
     debugImplementation("androidx.compose.ui:ui-tooling")
     debugImplementation("androidx.compose.ui:ui-test-manifest")

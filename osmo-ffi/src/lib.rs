@@ -291,6 +291,23 @@ impl Camera {
         })
     }
 
+    /// Keep a session open so `thumbnail_fast` can run in parallel. Any other call ends it; call again after.
+    pub fn browse_start(&self) -> Result<(), OsmoError> {
+        guarded(|| Ok(self.inner.browse_start()?))
+    }
+
+    pub fn browse_end(&self) {
+        let _ = guarded(|| {
+            self.inner.browse_end();
+            Ok(())
+        });
+    }
+
+    /// Thumbnail for a file from `list` (its `storage` is known). Needs `browse_start`; safe to call concurrently.
+    pub fn thumbnail_fast(&self, path: String, storage: u8) -> Result<Vec<u8>, OsmoError> {
+        guarded(|| Ok(self.inner.thumbnail_fast(&path, storage)?))
+    }
+
     pub fn thumbnail(&self, path: String) -> Result<Vec<u8>, OsmoError> {
         guarded(|| Ok(self.inner.thumbnail(&path)?))
     }

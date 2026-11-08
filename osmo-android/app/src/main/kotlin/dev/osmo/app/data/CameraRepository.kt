@@ -11,7 +11,11 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
-import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.Semaphore
+import kotlinx.coroutines.sync.withPermit
+import java.util.concurrent.locks.ReentrantReadWriteLock
+import kotlin.concurrent.read
+import kotlin.concurrent.write
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 import uniffi.osmo_ffi.Camera
@@ -58,8 +62,12 @@ class CameraRepository(private val app: Application) {
     val saved: StateFlow<SavedCamera?> = _saved.asStateFlow()
 
     @Volatile private var camera: Camera? = null
-    /** The camera allows one operation at a time. */
-    private val gate = Mutex()
+    /**
+     * The camera allows one datalink session. Operations take the write lock (and end any browse session);
+     * thumbnails and playback share the read lock on one kept-alive browse session, so they run in parallel.
+     */
+    private val rw = ReentrantReadWriteLock()
+    private val thumbPermits = Semaphore(6)
     private val thumbs = object : LruCache<String, ByteArray>(24 * 1024 * 1024) {
         override fun sizeOf(key: String, value: ByteArray) = value.size
     }
@@ -115,14 +123,28 @@ class CameraRepository(private val app: Application) {
 
     private fun cam(): Camera = camera ?: throw OsmoException.Session("Not connected to a camera")
 
-    private suspend fun <T> op(block: (Camera) -> T): T = withContext(Dispatchers.IO) { gate.withLock { block(cam()) } }
+    private suspend fun <T> op(block: (Camera) -> T): T = withContext(Dispatchers.IO) { rw.write { block(cam()) } }
 
     suspend fun list(kind: MediaKind?, starredOnly: Boolean): List<MediaFile> =
         op { it.list(ListFilter(kind, starredOnly), true) }
 
-    suspend fun thumbnail(path: String): ByteArray? {
-        thumbs.get(path)?.let { return it }
-        return runCatching { op { it.thumbnail(path) } }.getOrNull()?.also { thumbs.put(path, it) }
+    /** Cached; misses fetch over HTTP on the shared browse session, up to 6 at a time. */
+    suspend fun thumbnail(file: MediaFile): ByteArray? {
+        thumbs.get(file.path)?.let { return it }
+        return thumbPermits.withPermit {
+            thumbs.get(file.path) ?: runCatching {
+                withContext(Dispatchers.IO) {
+                    rw.read { cam().let { it.browseStart(); it.thumbnailFast(file.path, file.storage) } }
+                }
+            }.getOrNull()?.also { thumbs.put(file.path, it) }
+        }
+    }
+
+    /** URL to stream [file] (or its low-res proxy, if [proxy]) from the camera. Keeps the browse session open. */
+    suspend fun streamUrl(file: MediaFile, proxy: Boolean): String = withContext(Dispatchers.IO) {
+        rw.read { cam().browseStart() }
+        val path = if (proxy) file.path.substringBeforeLast('.') + ".LRF" else file.path
+        "http://$CAMERA_IP/v2?storage=${file.storage}&path=$path"
     }
 
     suspend fun setFavourite(path: String, on: Boolean) = op { it.setFavourite(path, on) }

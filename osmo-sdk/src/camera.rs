@@ -18,7 +18,7 @@ pub use osmo_core::mp4::TrimOutcome;
 use osmo_core::mp4::{self, Mp4Error};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -197,6 +197,8 @@ pub struct Camera {
     logger: Option<Callback>,
     notice: Option<Callback>,
     http_backoff: Option<Duration>,
+    /// A datalink session kept alive while a screen browses thumbnails (the camera serves HTTP only while one is open).
+    browse: Mutex<Option<Held>>,
 }
 
 /// Keeps the datalink alive on a background thread while a long HTTP transfer runs: the camera puts its
@@ -254,6 +256,7 @@ impl Camera {
             logger: None,
             notice: None,
             http_backoff: None,
+            browse: Mutex::new(None),
         }
     }
 
@@ -322,6 +325,12 @@ impl Camera {
     }
 
     fn session(&self) -> Result<Session, SdkError> {
+        // Any operation that needs its own session ends the browse session first (the camera allows one).
+        self.browse_end();
+        self.open_session()
+    }
+
+    fn open_session(&self) -> Result<Session, SdkError> {
         self.check_cancel()?;
         let mut s = (self.open)()?;
         if let Some(l) = self.logger.clone() {
@@ -406,6 +415,46 @@ impl Camera {
     }
 
     /// The image for `path`: its screennail or thumbnail, else the JPEG embedded in a still.
+    /// Open (once) and keep a datalink session so many `thumbnail_fast` calls can run at the same time.
+    /// Any other operation on this camera ends it automatically; call this again afterwards.
+    pub fn browse_start(&self) -> Result<(), SdkError> {
+        let mut g = self.browse.lock().unwrap_or_else(|e| e.into_inner());
+        if g.is_none() {
+            let s = self.open_session()?;
+            *g = Some(Held::start(s));
+        }
+        Ok(())
+    }
+
+    /// End the browse session, if any.
+    pub fn browse_end(&self) {
+        let held = self.browse.lock().unwrap_or_else(|e| e.into_inner()).take();
+        if let Some(h) = held {
+            h.release();
+        }
+    }
+
+    /// A thumbnail for a file whose store is known (from a listing): no listing lookup and no session of its
+    /// own, so it is safe to run many at once after `browse_start`. Does not reset the cancel flag.
+    pub fn thumbnail_fast(&self, path: &str, storage: u8) -> Result<Vec<u8>, SdkError> {
+        let path = validate_get_path(path).map_err(SdkError::NotFound)?;
+        let file = file_from_path(storage, path);
+        let http = self.http();
+        for src in thumb_sources(&file) {
+            self.check_cancel()?;
+            let bytes = match &src {
+                ThumbSource::Whole(p) => http.get_bytes(p),
+                ThumbSource::EmbeddedHead(p) => http
+                    .get_range(p, 0, HEAD_BYTES as u64 - 1)
+                    .and_then(|head| embedded_jpeg(&head)),
+            };
+            if let Some(b) = bytes.filter(|b| image_kind(b).is_some()) {
+                return Ok(b);
+            }
+        }
+        Err(SdkError::NotFound(format!("no thumbnail available for {path}")))
+    }
+
     pub fn thumbnail(&self, path: &str) -> Result<Vec<u8>, SdkError> {
         self.thumbnail_from(path, None).map(|t| t.bytes)
     }
