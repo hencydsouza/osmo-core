@@ -3,6 +3,7 @@
 use thiserror::Error;
 
 pub mod boxes;
+pub mod plan;
 pub mod tables;
 
 use boxes::{find, walk_mem, walk_top_level, MemBox};
