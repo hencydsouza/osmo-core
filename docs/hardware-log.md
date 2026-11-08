@@ -246,3 +246,10 @@ multi-attempt download *with* keepalive (no cuts happened in either keepalive ru
 `DJI_20261101084646_0008_D.LRF` (Action 4 proxy, 4 trak: vide 94, soun 177, djmd 94, tmcd 1 samples; keyframes every 1.2 s).
 Cut 0.94..2.82 s: 71 video packets, matching `ffmpeg -ss 0.94 -t 1.88 -c copy` (71). Every output sample is byte-identical to its source sample, ffprobe stream/packet counts match the plan, and ffmpeg decodes with no errors.
 Found: a lone-sample `tmcd` track must have its duration shrunk to the cut, or the container reports the original length (3.76 s instead of 2.84 s).
+
+## 2026-11-08: CLI on osmo-sdk, live Action 4 (HencysAction4)
+
+- `ls --all` through `with-wifi`: 13 SD files listed, 2 starred, sizes as before.
+- `rm` with one valid and one typo path: `refused: ...TYPO.MP4: not found`, `nothing was deleted`, exit 1. `rm` of the valid path alone, no `--yes`: dry-run list, nothing deleted.
+- `trim DJI_20261101084646_0008_D.MP4 --from 1 --to 3` with no ffmpeg involved: read 40.8 MiB over HTTP ranges, saved 42.8 MB. ffprobe: hevc 75 frames, aac 141, two data streams 75, tmcd 1; duration 3.008 s. `ffmpeg -v error -f null -` decoded it with no output.
+- Not run live this pass: `thumb`, `get`, `get --proxy`, `star` (those commands were not changed; `star` and `thumb` on the old path passed earlier in the project).
