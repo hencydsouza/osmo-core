@@ -164,6 +164,48 @@ pub fn read_wifi_credentials(link: Arc<dyn BleLink>) -> Result<WifiCredentials, 
     })
 }
 
+/// Cut `from_secs..to_secs` out of an MP4 already on disk, without re-encoding. The cut starts at the
+/// keyframe at or before `from_secs`. Needs no camera, so apps can trim a downloaded clip.
+#[uniffi::export]
+pub fn trim_local_file(
+    src_path: String,
+    from_secs: f64,
+    to_secs: f64,
+    dest_path: String,
+    progress: Option<Arc<dyn ProgressListener>>,
+) -> Result<TrimResult, OsmoError> {
+    guarded(|| {
+        check_secs("from", from_secs)?;
+        check_secs("to", to_secs)?;
+        let mut src =
+            osmo_core::mp4::FileSource::open(Path::new(&src_path)).map_err(|e| OsmoError::Io {
+                message: e.to_string(),
+            })?;
+        let stop = std::sync::atomic::AtomicBool::new(false);
+        let mut p = |done, total| {
+            if let Some(l) = &progress {
+                if !l.on_progress(done, total) {
+                    stop.store(true, std::sync::atomic::Ordering::Relaxed);
+                }
+            }
+        };
+        let r = osmo_core::mp4::trim(
+            &mut src,
+            dest(&dest_path)?,
+            from_secs,
+            to_secs,
+            &|| stop.load(std::sync::atomic::Ordering::Relaxed),
+            &mut p,
+        )
+        .map_err(|e| OsmoError::from(SdkError::from(e)))?;
+        Ok(TrimResult {
+            actual_start_secs: r.actual_start_secs,
+            duration_secs: r.duration_secs,
+            bytes: r.bytes,
+        })
+    })
+}
+
 #[uniffi::export]
 pub fn sdk_version() -> String {
     env!("CARGO_PKG_VERSION").to_string()
@@ -479,6 +521,46 @@ mod tests {
         });
         let r = read_wifi_credentials(dead);
         assert!(matches!(r, Err(OsmoError::Ble { .. })), "{r:?}");
+    }
+
+    fn fixture(name: &str) -> String {
+        format!(
+            "{}/../osmo-core/tests/fixtures/{name}",
+            env!("CARGO_MANIFEST_DIR")
+        )
+    }
+
+    #[test]
+    fn trim_local_file_cuts_a_fixture_and_refuses_bad_ranges() {
+        let dir = tempfile::tempdir().unwrap();
+        let out = dir.path().join("cut.mp4").to_string_lossy().into_owned();
+        let r = trim_local_file(fixture("h264_aac.mp4"), 0.5, 1.5, out.clone(), None).unwrap();
+        assert!(r.duration_secs > 0.9 && r.duration_secs < 1.6, "{r:?}");
+        assert!(std::fs::metadata(&out).unwrap().len() == r.bytes);
+        let bad = trim_local_file(fixture("h264_aac.mp4"), 2.0, 1.0, out.clone(), None);
+        assert!(matches!(bad, Err(OsmoError::Mp4 { .. })), "{bad:?}");
+        let missing = trim_local_file("/nonexistent.mp4".into(), 0.0, 1.0, out, None);
+        assert!(matches!(missing, Err(OsmoError::Io { .. })), "{missing:?}");
+        struct Stop;
+        impl ProgressListener for Stop {
+            fn on_progress(&self, _: u64, _: u64) -> bool {
+                false
+            }
+        }
+        let dest2 = dir
+            .path()
+            .join("stopped.mp4")
+            .to_string_lossy()
+            .into_owned();
+        let c = trim_local_file(
+            fixture("h264_aac.mp4"),
+            0.0,
+            1.5,
+            dest2.clone(),
+            Some(Arc::new(Stop)),
+        );
+        assert!(matches!(c, Err(OsmoError::Cancelled { .. })), "{c:?}");
+        assert!(!Path::new(&dest2).exists());
     }
 
     #[test]

@@ -5,3 +5,9 @@
 *.log
 .env
 .scratch-probe/
+dist/
+sdk-tests/swift/Sources/
+sdk-tests/swift/.build/
+sdk-tests/android/.gradle/
+sdk-tests/android/build/
+sdk-tests/android/app/build/
