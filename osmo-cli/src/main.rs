@@ -7,7 +7,7 @@ use osmo_cli::listing::{
     progress_line, resolve_requested, sidecars_to_fetch, thumb_sources, truncation_warning,
     validate_get_path, zone_from_link, ThumbSource,
 };
-use osmo_cli::listing::{filter_files, format_marks, Kind};
+use osmo_cli::listing::{filter_files, find_file, format_marks, Kind};
 use osmo_cli::{cameras, config, route::route_warning};
 use osmo_core::ble::{
     model_name, pair_and_read_wifi, start_livestream_cancellable, PairOptions, StreamConfig,
@@ -218,7 +218,7 @@ enum Cmd {
         port: Option<u16>,
     },
     /// Delete files from the camera. IRREVERSIBLE. Paths are exactly as `osmo ls` prints them (no globs). Without
-    /// --yes it only prints what it would delete. Only files in the newest listing can be deleted.
+    /// --yes it only prints what it would delete. Older pages are searched until every path is found.
     Rm {
         #[arg(required = true)]
         paths: Vec<String>,
@@ -663,7 +663,19 @@ fn rm_cmd(paths: &[String], yes: bool, ip: &str, port: u16, verbose: bool) -> Re
     }
     let mut sess = open_session(ip, port, verbose)?;
     eprintln!("Listing {ip}:{port} ...");
-    let files = sess.list_newest().map_err(session_err)?;
+    let mut files = sess.list_newest().map_err(session_err)?;
+    // Walk older pages only until every path is found: a long walk would age the session past the point where
+    // the camera still honours writes (the delete is then refused, never sent).
+    for _ in 0..500 {
+        if !sess.more_available() || paths.iter().all(|p| find_file(&files, p).is_some()) {
+            break;
+        }
+        let next = sess.list_next_page().map_err(session_err)?;
+        if next.is_empty() {
+            break;
+        }
+        files.extend(next);
+    }
     warn_if_unconfirmed(&sess);
     let plan = match plan_deletions(&files, paths) {
         Ok(p) => p,

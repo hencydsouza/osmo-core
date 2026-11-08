@@ -231,3 +231,6 @@ multi-attempt download *with* keepalive (no cuts happened in either keepalive ru
 ## Un-favourite variant search (2026-11-08): negative
 - Sent six payload variants on 0009 (last five bytes: 00 02 00 00 00 / 00 ff 00 00 00 / 01 00 00 00 00 / 00 00 01 00 00 / 00 00 00 01 00 / 02 00 00 00 00). The camera acknowledged every one and kept the star. It acks any content, so blind variants cannot find the right frame. Probe code removed. Needs a Mimo capture on an Action 4.
 - Time sync: our registration, subscriptions, receiver (type 0x08 id 1) and payload match Osmosis's sender line for line; the Action 4 still answers 0xe0 (same code it gives the 0x02/0x0C playback entry). Likely a different command on this model. Needs a Mimo capture too.
+
+## rm across pages (2026-11-08)
+- Dry runs only (no delete sent): a typo path is refused by name with nothing deleted; a valid path prints `would delete`. The card has 14 files on one page, so the older-page walk itself was not exercised live (it reuses the `ls --all` paging that HW-A verified).

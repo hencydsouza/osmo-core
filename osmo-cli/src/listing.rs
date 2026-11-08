@@ -425,11 +425,16 @@ pub fn plan_deletions<'a>(
         }
         match find_file(files, path) {
             None => refusals.push(format!(
-                "{path}: not in the camera's newest listing, so it will not be deleted (check it against `osmo ls`)"
+                "{path}: not found on the camera, so it will not be deleted (check it against `osmo ls --all`)"
             )),
             Some(f) if !f.deletable() => refusals.push(format!(
                 "{path}: no verified, unshared handle, so it will not be deleted"
             )),
+            // The per-page "shared" flag cannot see a clash with a file on another page.
+            Some(f) if files.iter().any(|o| o.path != f.path && o.handle == f.handle) => refusals
+                .push(format!(
+                    "{path}: its handle is shared with another file, so it will not be deleted"
+                )),
             Some(f) => {
                 if !chosen.iter().any(|c| c.path == f.path) {
                     chosen.push(f);
@@ -767,6 +772,38 @@ mod tests {
         let err = plan_deletions(&files, &req).unwrap_err();
         assert_eq!(err.len(), 2);
         assert!(err[0].contains("A_0001_D.JPG") && err[1].contains("B_0002_D.JPG"));
+    }
+
+    #[test]
+    fn plan_deletions_refuses_a_handle_shared_with_a_file_on_another_page() {
+        // Two files from different pages each look unshared on their own page, but hold the same handle.
+        let a = deletable_file("DCIM/DJI_001/A_0001_D.JPG", 0x40100040);
+        let b = deletable_file("DCIM/DJI_002/B_0900_D.JPG", 0x40100040);
+        let c = deletable_file("DCIM/DJI_001/C_0002_D.JPG", 0x40100080);
+        let files = vec![a, c, b];
+        let err = plan_deletions(&files, &["DCIM/DJI_001/A_0001_D.JPG".to_string()]).unwrap_err();
+        assert!(
+            err[0].contains("A_0001_D.JPG") && err[0].contains("shared"),
+            "{err:?}"
+        );
+        // The file with its own handle is still fine.
+        assert_eq!(
+            plan_deletions(&files, &["DCIM/DJI_001/C_0002_D.JPG".to_string()])
+                .unwrap()
+                .len(),
+            1
+        );
+    }
+
+    #[test]
+    fn plan_deletions_names_a_missing_file_as_not_listed_not_as_newest() {
+        let files = vec![deletable_file("DCIM/DJI_001/A_0001_D.JPG", 0x40100040)];
+        let err =
+            plan_deletions(&files, &["DCIM/DJI_001/NOPE_0009_D.JPG".to_string()]).unwrap_err();
+        assert!(
+            err[0].contains("not found on the camera") && !err[0].contains("newest"),
+            "{err:?}"
+        );
     }
 
     #[test]
