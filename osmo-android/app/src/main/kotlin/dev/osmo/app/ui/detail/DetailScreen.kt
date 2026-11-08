@@ -4,6 +4,7 @@ package dev.osmo.app.ui.detail
 
 import android.graphics.BitmapFactory
 import androidx.compose.foundation.Image
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
@@ -39,6 +40,8 @@ import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.aspectRatio
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.PaddingValues
+import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.filled.CameraAlt
 import androidx.compose.material.icons.filled.ContentCut
@@ -165,7 +168,7 @@ class DetailViewModel(private val repo: CameraRepository, val file: MediaFile) :
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-fun DetailScreen(vm: DetailViewModel, active: Boolean = true, position: String = "", onBack: () -> Unit) {
+fun DetailScreen(vm: DetailViewModel, active: Boolean = true, position: String = "", controls: Boolean = true, onToggleControls: () -> Unit = {}, onBack: () -> Unit) {
     val s by vm.state.collectAsStateWithLifecycle()
     val snack = remember { SnackbarHostState() }
     LaunchedEffect(s.message) { s.message?.takeIf { it.isNotEmpty() }?.let { snack.showSnackbar(it) } }
@@ -226,7 +229,7 @@ fun DetailScreen(vm: DetailViewModel, active: Boolean = true, position: String =
         containerColor = scheme.surface,
         snackbarHost = { SnackbarHost(snack) },
         topBar = {
-            TopAppBar(
+            androidx.compose.animation.AnimatedVisibility(controls, enter = androidx.compose.animation.expandVertically(), exit = androidx.compose.animation.shrinkVertically()) { TopAppBar(
                 title = { if (position.isNotEmpty()) Text(position, style = MaterialTheme.typography.titleMedium) },
                 navigationIcon = { IconButton(onClick = onBack, colors = IconButtonDefaults.iconButtonColors(containerColor = MaterialTheme.colorScheme.surfaceBright)) { Icon(Icons.AutoMirrored.Filled.ArrowBack, "Back") } },
                 actions = {
@@ -237,14 +240,15 @@ fun DetailScreen(vm: DetailViewModel, active: Boolean = true, position: String =
                     }
                     IconButton(onClick = vm::planDelete, enabled = idle) { Icon(Icons.Filled.Delete, "Delete from camera") }
                 },
-            )
+            ) }
         },
     ) { pad ->
         Column(Modifier.padding(pad).verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(20.dp)) {
             // Hero: edge-to-edge media, rounded bottom (shape: my design decision, not in M3).
             Box(
                 Modifier.fillMaxWidth().padding(horizontal = 16.dp).aspectRatio(16f / 9f)
-                    .clip(RoundedCornerShape(28.dp)).background(scheme.surfaceContainerHigh),
+                    .clip(RoundedCornerShape(28.dp)).background(scheme.surfaceContainerHigh)
+                    .clickable(onClick = onToggleControls),
                 contentAlignment = Alignment.Center,
             ) {
                 val p = player
@@ -403,9 +407,39 @@ private fun DetailsSheet(file: MediaFile, durationMs: Long, onDismiss: () -> Uni
 fun DetailPager(repo: CameraRepository, start: MediaFile, onBack: () -> Unit) {
     val files = remember { repo.browseList.takeIf { l -> l.any { it.path == start.path } } ?: listOf(start) }
     val pager = androidx.compose.foundation.pager.rememberPagerState(initialPage = files.indexOfFirst { it.path == start.path }.coerceAtLeast(0)) { files.size }
-    androidx.compose.foundation.pager.HorizontalPager(pager, Modifier.fillMaxSize(), beyondViewportPageCount = 0, key = { files[it].path }) { i ->
-        val f = files[i]
-        val vm: DetailViewModel = androidx.lifecycle.viewmodel.compose.viewModel(key = f.path) { DetailViewModel(repo, f) }
-        DetailScreen(vm, active = pager.currentPage == i, position = "${i + 1} / ${files.size}", onBack = onBack)
+    var controls by remember { mutableStateOf(true) }
+    val scope = androidx.compose.runtime.rememberCoroutineScope()
+    Column(Modifier.fillMaxSize().background(MaterialTheme.colorScheme.surface)) {
+        androidx.compose.foundation.pager.HorizontalPager(pager, Modifier.weight(1f), beyondViewportPageCount = 0, key = { files[it].path }) { i ->
+            val f = files[i]
+            val vm: DetailViewModel = androidx.lifecycle.viewmodel.compose.viewModel(key = f.path) { DetailViewModel(repo, f) }
+            DetailScreen(vm, active = pager.currentPage == i, position = "${i + 1} / ${files.size}", controls = controls, onToggleControls = { controls = !controls }, onBack = onBack)
+        }
+        androidx.compose.animation.AnimatedVisibility(controls && files.size > 1) {
+            ThumbStrip(repo, files, pager.currentPage) { i -> scope.launch { pager.animateScrollToPage(i) } }
+        }
+    }
+}
+
+@Composable
+private fun ThumbStrip(repo: CameraRepository, files: List<MediaFile>, current: Int, onPick: (Int) -> Unit) {
+    val state = androidx.compose.foundation.lazy.rememberLazyListState()
+    LaunchedEffect(current) { state.animateScrollToItem((current - 2).coerceAtLeast(0)) }
+    androidx.compose.foundation.lazy.LazyRow(
+        state = state, modifier = Modifier.fillMaxWidth().navigationBarsPadding().padding(vertical = 8.dp),
+        contentPadding = PaddingValues(horizontal = 16.dp), horizontalArrangement = Arrangement.spacedBy(6.dp),
+    ) {
+        items(files.size, key = { files[it].path }) { i ->
+            val f = files[i]
+            val bmp by produceState<androidx.compose.ui.graphics.ImageBitmap?>(null, f.path) {
+                value = repo.thumbnail(f)?.let { b -> BitmapFactory.decodeByteArray(b, 0, b.size)?.asImageBitmap() }
+            }
+            val sel = i == current
+            val w by androidx.compose.animation.core.animateDpAsState(if (sel) 56.dp else 40.dp, MaterialTheme.motionScheme.defaultSpatialSpec(), label = "w")
+            Box(
+                Modifier.size(width = w, height = 56.dp).clip(RoundedCornerShape(12.dp))
+                    .background(MaterialTheme.colorScheme.surfaceContainerHigh).clickable { onPick(i) },
+            ) { bmp?.let { Image(it, null, Modifier.fillMaxSize(), contentScale = ContentScale.Crop) } }
+        }
     }
 }

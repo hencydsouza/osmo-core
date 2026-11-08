@@ -15,8 +15,19 @@ android {
         versionName = "0.1.0"
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }
+    // Release signing comes from the environment (CI secrets); without them the release APK stays unsigned.
+    val keystore = System.getenv("OSMO_KEYSTORE")
+    signingConfigs {
+        if (keystore != null) create("release") {
+            storeFile = file(keystore)
+            storePassword = System.getenv("OSMO_KEYSTORE_PASSWORD")
+            keyAlias = System.getenv("OSMO_KEY_ALIAS")
+            keyPassword = System.getenv("OSMO_KEY_PASSWORD")
+        }
+    }
     buildTypes {
         release {
+            if (keystore != null) signingConfig = signingConfigs.getByName("release")
             isMinifyEnabled = true
             isShrinkResources = true
             proguardFiles(getDefaultProguardFile("proguard-android-optimize.txt"), "proguard-rules.pro")

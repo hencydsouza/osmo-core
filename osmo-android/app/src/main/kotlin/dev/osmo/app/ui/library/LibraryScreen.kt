@@ -8,6 +8,7 @@ import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
@@ -281,10 +282,15 @@ private fun Tile(f: MediaFile, selected: Boolean, vm: LibraryViewModel, onClick:
             .background(scheme.surfaceContainerHigh)
             .combinedClickable(onClick = onClick, onLongClick = onLong),
     ) {
-        bmp?.let { Image(it, f.path, Modifier.fillMaxSize(), contentScale = ContentScale.Crop) }
+        androidx.compose.animation.AnimatedVisibility(bmp != null, enter = androidx.compose.animation.fadeIn(), exit = androidx.compose.animation.ExitTransition.None) {
+            bmp?.let { Image(it, f.path, Modifier.fillMaxSize(), contentScale = ContentScale.Crop) }
+        }
         if (f.kind == MediaKind.VIDEO) {
-            Box(Modifier.align(Alignment.BottomStart).padding(6.dp).background(scheme.scrim.copy(alpha = 0.55f), CircleShape).padding(4.dp)) {
-                Icon(Icons.Filled.PlayArrow, "Video", Modifier.size(16.dp), tint = Color.White)
+            // The camera listing has no clip length, so the badge shows file size instead.
+            Row(Modifier.align(Alignment.BottomStart).padding(6.dp).background(scheme.scrim.copy(alpha = 0.55f), CircleShape).padding(horizontal = 6.dp, vertical = 3.dp), verticalAlignment = Alignment.CenterVertically) {
+                Icon(Icons.Filled.PlayArrow, "Video", Modifier.size(14.dp), tint = Color.White)
+                val mb = f.sizeBytes.toLong() / 1_000_000
+                Text(if (mb >= 1000) "%.1f GB".format(mb / 1000.0) else "$mb MB", style = MaterialTheme.typography.labelSmall, color = Color.White)
             }
         }
         if (f.starred) {

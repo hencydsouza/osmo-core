@@ -38,14 +38,17 @@ sealed interface Link {
 /** Human-readable text for any SDK error. */
 fun Throwable.friendly(): String = when (this) {
     is OsmoException.Cancelled -> "Cancelled"
-    is OsmoException.Session -> "Camera session: $detail"
-    is OsmoException.NotFound -> "Not found: $detail"
-    is OsmoException.Refused -> "Refused: $detail"
-    is OsmoException.Io -> "I/O: $detail"
-    is OsmoException.Mp4 -> "Video file: $detail"
-    is OsmoException.Ble -> "Bluetooth: $detail"
-    is OsmoException.Internal -> "Internal error: $detail"
-    else -> message ?: toString()
+    is OsmoException.Session ->
+        if (detail.contains("no response", true) || detail.contains("timed out", true))
+            "The camera isn\u2019t answering. Check it\u2019s on and in range, then try again."
+        else "Lost the connection to the camera. Reconnect and try again."
+    is OsmoException.NotFound -> "That file is no longer on the camera."
+    is OsmoException.Refused -> "Not allowed: $detail"
+    is OsmoException.Io -> "Couldn\u2019t read or write the file. Check there\u2019s free space on the phone."
+    is OsmoException.Mp4 -> "This video can\u2019t be cut here."
+    is OsmoException.Ble -> "Bluetooth problem. Make sure Bluetooth is on and the camera is nearby."
+    is OsmoException.Internal -> "Something went wrong inside the app."
+    else -> message ?: "Something went wrong."
 }
 
 const val CAMERA_IP = "192.168.2.1"

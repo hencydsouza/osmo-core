@@ -1,0 +1,60 @@
+name: android-app
+
+on:
+  push:
+    branches: [main]
+    paths: ["osmo-android/**", "osmo-ffi/**", "osmo-sdk/**", "osmo-core/**", "scripts/build-sdk-android.sh", ".github/workflows/android-app.yml"]
+    tags: ["app-v*"]
+  pull_request:
+    paths: ["osmo-android/**", "osmo-ffi/**", "osmo-sdk/**", "scripts/build-sdk-android.sh"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with: { targets: "aarch64-linux-android,armv7-linux-androideabi,x86_64-linux-android,i686-linux-android" }
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo install cargo-ndk --locked
+      - uses: actions/setup-java@v4
+        with: { distribution: temurin, java-version: "17" }
+      - uses: android-actions/setup-android@v3
+      - name: Build native library and Kotlin bindings
+        run: |
+          export ANDROID_NDK_HOME="$ANDROID_NDK_LATEST_HOME"
+          scripts/build-sdk-android.sh
+      - name: Restore signing key (tags only)
+        if: startsWith(github.ref, 'refs/tags/app-v') && env.KEYSTORE_B64 != ''
+        env:
+          KEYSTORE_B64: ${{ secrets.OSMO_KEYSTORE_B64 }}
+        run: |
+          echo "$KEYSTORE_B64" | base64 -d > "$RUNNER_TEMP/osmo.jks"
+          echo "OSMO_KEYSTORE=$RUNNER_TEMP/osmo.jks" >> "$GITHUB_ENV"
+          echo "OSMO_KEYSTORE_PASSWORD=${{ secrets.OSMO_KEYSTORE_PASSWORD }}" >> "$GITHUB_ENV"
+          echo "OSMO_KEY_ALIAS=${{ secrets.OSMO_KEY_ALIAS }}" >> "$GITHUB_ENV"
+          echo "OSMO_KEY_PASSWORD=${{ secrets.OSMO_KEY_PASSWORD }}" >> "$GITHUB_ENV"
+      - name: Unit tests
+        working-directory: osmo-android
+        run: ./gradlew :app:testDebugUnitTest --console=plain
+      - name: Debug APK
+        working-directory: osmo-android
+        run: ./gradlew :app:assembleDebug --console=plain
+      - name: Release APK
+        if: startsWith(github.ref, 'refs/tags/app-v')
+        working-directory: osmo-android
+        run: ./gradlew :app:assembleRelease --console=plain
+      - uses: actions/upload-artifact@v4
+        with:
+          name: osmo-app-apks
+          path: osmo-android/app/build/outputs/apk/**/*.apk
+      - name: Publish release
+        if: startsWith(github.ref, 'refs/tags/app-v')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: osmo-android/app/build/outputs/apk/release/*.apk
+          generate_release_notes: true
