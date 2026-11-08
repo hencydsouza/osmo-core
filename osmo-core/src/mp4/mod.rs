@@ -30,7 +30,7 @@ pub enum Mp4Error {
 /// A source `read_movie` and `trim` can fetch byte ranges from, without assuming the whole file
 /// fits in memory. Implemented over a local file (`FileSource`) and, by the SDK, over HTTP.
 #[allow(clippy::len_without_is_empty)] // `len` here is fallible and asks the source for its
-// size; an `is_empty` beside it would add nothing the Interfaces block doesn't already cover.
+                                       // size; an `is_empty` beside it would add nothing the Interfaces block doesn't already cover.
 pub trait RangeSource {
     fn len(&mut self) -> Result<u64, Mp4Error>;
     fn read_at(&mut self, offset: u64, len: usize) -> Result<Vec<u8>, Mp4Error>;

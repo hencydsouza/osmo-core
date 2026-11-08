@@ -6,3 +6,6 @@ license = "MIT"
 
 [dependencies]
 osmo-core = { path = "../osmo-core" }
+
+[dev-dependencies]
+tempfile = "3"

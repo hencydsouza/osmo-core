@@ -6,6 +6,8 @@ use std::cell::RefCell;
 use std::fs::OpenOptions;
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::Path;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 use std::time::Duration;
 use thiserror::Error;
 
@@ -40,6 +42,8 @@ pub enum DownloadError {
     Stalled { at: u64 },
     #[error(transparent)]
     Io(#[from] std::io::Error),
+    #[error("cancelled")]
+    Cancelled,
 }
 
 #[derive(Debug, Clone)]
@@ -67,6 +71,7 @@ pub struct HttpClient {
     base: String,
     pub policy: RetryPolicy,
     logger: RefCell<Option<Logger>>,
+    cancel: Option<Arc<AtomicBool>>,
 }
 
 fn agent() -> ureq::Agent {
@@ -87,7 +92,19 @@ impl HttpClient {
             base: base.trim_end_matches('/').to_string(),
             policy: RetryPolicy::default(),
             logger: RefCell::new(None),
+            cancel: None,
         }
+    }
+
+    /// Stop transfers when `flag` becomes true: checked once per received chunk and before each resume.
+    pub fn set_cancel(&mut self, flag: Arc<AtomicBool>) {
+        self.cancel = Some(flag);
+    }
+
+    fn cancelled(&self) -> bool {
+        self.cancel
+            .as_ref()
+            .is_some_and(|f| f.load(Ordering::Relaxed))
     }
 
     /// Receive one line per download attempt (offset, outcome, bytes on disk, backoff).
@@ -126,6 +143,33 @@ impl HttpClient {
             .set("Connection", "close")
             .set("Range", &format!("bytes={start}-{end}"));
         self.read_limited(req, end.checked_sub(start)? + 1)
+    }
+
+    /// An inclusive byte range plus the file's total length from `Content-Range` (`bytes a-b/total`), if the
+    /// server sent one. Same limits as `get_range`.
+    pub fn get_range_total(
+        &self,
+        path: &str,
+        start: u64,
+        end: u64,
+    ) -> Option<(Vec<u8>, Option<u64>)> {
+        let resp = agent()
+            .get(&self.url(path))
+            .set("Accept", "*/*")
+            .set("Connection", "close")
+            .set("Range", &format!("bytes={start}-{end}"))
+            .call()
+            .ok()?;
+        let total = resp
+            .header("Content-Range")
+            .and_then(|v| v.rsplit('/').next())
+            .and_then(|t| t.trim().parse().ok());
+        let mut out = Vec::new();
+        resp.into_reader()
+            .take(end.checked_sub(start)? + 1)
+            .read_to_end(&mut out)
+            .ok()?;
+        Some((out, total))
     }
 
     pub fn url(&self, path: &str) -> String {
@@ -174,6 +218,10 @@ impl HttpClient {
         let mut buf = vec![0u8; 65536];
         let mut total = range_start;
         loop {
+            if self.cancelled() {
+                let _ = out.flush();
+                return Fetch::Interrupted;
+            }
             match reader.read(&mut buf) {
                 Ok(0) => break,
                 Ok(n) => {
@@ -240,6 +288,9 @@ impl HttpClient {
             };
             if complete {
                 return Ok(Outcome::Saved);
+            }
+            if self.cancelled() {
+                return Err(DownloadError::Cancelled);
             }
             barren = if after > offset { 0 } else { barren + 1 };
             if barren >= self.policy.max_barren || attempt >= self.policy.max_resumes {

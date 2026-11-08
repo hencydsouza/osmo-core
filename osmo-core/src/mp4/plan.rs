@@ -68,19 +68,30 @@ pub fn plan_trim(movie: &Movie, from_secs: f64, to_secs: f64) -> Result<TrimPlan
 
     // End: the first sample at or after `to` (ceil), clamped to the clip's real end.
     let to_ticks = (to_secs * scale).ceil() as u64;
-    let end = video.samples.partition_point(|s| s.dts < to_ticks).max(start + 1);
+    let end = video
+        .samples
+        .partition_point(|s| s.dts < to_ticks)
+        .max(start + 1);
     let end_clamped = end == video.samples.len();
     let end_dts = video.samples.get(end).map_or(video.duration, |s| s.dts);
 
     let actual_start_secs = start_dts as f64 / scale;
     let end_secs = end_dts as f64 / scale;
-    let mut cuts = vec![TrackCut { track: vi, first: start, end }];
+    let mut cuts = vec![TrackCut {
+        track: vi,
+        first: start,
+        end,
+    }];
 
     for (i, t) in movie.tracks.iter().enumerate().filter(|(i, _)| *i != vi) {
         match t.samples.len() {
             0 => {}
             // A lone sample (the timecode track) describes the whole clip, so it is kept whole.
-            1 => cuts.push(TrackCut { track: i, first: 0, end: 1 }),
+            1 => cuts.push(TrackCut {
+                track: i,
+                first: 0,
+                end: 1,
+            }),
             _ => {
                 let ts = f64::from(t.timescale.max(1));
                 let (first, mut end) = span(
@@ -92,12 +103,20 @@ pub fn plan_trim(movie: &Movie, from_secs: f64, to_secs: f64) -> Result<TrimPlan
                 if end_clamped {
                     end = t.samples.len();
                 }
-                cuts.push(TrackCut { track: i, first, end });
+                cuts.push(TrackCut {
+                    track: i,
+                    first,
+                    end,
+                });
             }
         }
     }
     cuts.sort_by_key(|c| c.track);
-    Ok(TrimPlan { cuts, actual_start_secs, duration_secs: end_secs - actual_start_secs })
+    Ok(TrimPlan {
+        cuts,
+        actual_start_secs,
+        duration_secs: end_secs - actual_start_secs,
+    })
 }
 
 #[cfg(test)]
@@ -132,12 +151,24 @@ mod tests {
     }
 
     fn movie(tracks: Vec<Track>) -> Movie {
-        Movie { movie_timescale: 1000, tracks, ftyp: vec![] }
+        Movie {
+            movie_timescale: 1000,
+            tracks,
+            ftyp: vec![],
+        }
     }
 
     /// 7 video samples at 10 ticks/s (0.7 s); sync at dts 0, 3, 6.
     fn video() -> Track {
-        let s = [(0, 1, true), (1, 1, false), (2, 1, false), (3, 1, true), (4, 1, false), (5, 1, false), (6, 1, true)];
+        let s = [
+            (0, 1, true),
+            (1, 1, false),
+            (2, 1, false),
+            (3, 1, true),
+            (4, 1, false),
+            (5, 1, false),
+            (6, 1, true),
+        ];
         track(b"vide", 10, 7, &s)
     }
 
@@ -148,7 +179,14 @@ mod tests {
     #[test]
     fn start_snaps_back_to_the_previous_sync_sample() {
         let plan = plan_trim(&movie(vec![video()]), 0.5, 0.6).unwrap();
-        assert_eq!(plan.cuts, vec![TrackCut { track: 0, first: 3, end: 6 }]);
+        assert_eq!(
+            plan.cuts,
+            vec![TrackCut {
+                track: 0,
+                first: 3,
+                end: 6
+            }]
+        );
         assert!(close(plan.actual_start_secs, 0.3));
         assert!(close(plan.duration_secs, 0.3));
     }
@@ -156,7 +194,14 @@ mod tests {
     #[test]
     fn end_is_exclusive_and_clamps_to_clip_end_reporting_real_duration() {
         let plan = plan_trim(&movie(vec![video()]), 0.0, 5.0).unwrap();
-        assert_eq!(plan.cuts, vec![TrackCut { track: 0, first: 0, end: 7 }]);
+        assert_eq!(
+            plan.cuts,
+            vec![TrackCut {
+                track: 0,
+                first: 0,
+                end: 7
+            }]
+        );
         assert!(close(plan.actual_start_secs, 0.0));
         assert!(close(plan.duration_secs, 0.7));
     }
@@ -173,9 +218,21 @@ mod tests {
         assert_eq!(
             plan.cuts,
             vec![
-                TrackCut { track: 0, first: 3, end: 6 },
-                TrackCut { track: 1, first: 6, end: 12 },
-                TrackCut { track: 2, first: 3, end: 6 },
+                TrackCut {
+                    track: 0,
+                    first: 3,
+                    end: 6
+                },
+                TrackCut {
+                    track: 1,
+                    first: 6,
+                    end: 12
+                },
+                TrackCut {
+                    track: 2,
+                    first: 3,
+                    end: 6
+                },
             ]
         );
     }
@@ -185,7 +242,14 @@ mod tests {
         let audio_samples: Vec<(u64, u32, bool)> = (0..15).map(|i| (i, 1, true)).collect();
         let audio = track(b"soun", 20, 15, &audio_samples);
         let plan = plan_trim(&movie(vec![video(), audio]), 0.0, 5.0).unwrap();
-        assert_eq!(plan.cuts[1], TrackCut { track: 1, first: 0, end: 15 });
+        assert_eq!(
+            plan.cuts[1],
+            TrackCut {
+                track: 1,
+                first: 0,
+                end: 15
+            }
+        );
     }
 
     #[test]
@@ -193,7 +257,14 @@ mod tests {
         let tmcd = track(b"tmcd", 1, 1, &[(0, 999, true)]);
         let plan = plan_trim(&movie(vec![video(), tmcd]), 0.3, 0.6).unwrap();
         assert!(close(plan.actual_start_secs, 0.3));
-        assert_eq!(plan.cuts[1], TrackCut { track: 1, first: 0, end: 1 });
+        assert_eq!(
+            plan.cuts[1],
+            TrackCut {
+                track: 1,
+                first: 0,
+                end: 1
+            }
+        );
     }
 
     #[test]
@@ -218,7 +289,10 @@ mod tests {
         for (from, to) in cases {
             match plan_trim(&m, from, to) {
                 Err(Mp4Error::BadRange(msg)) => {
-                    assert!(msg.contains("0.700"), "{from}..{to}: message lacks clip length: {msg}")
+                    assert!(
+                        msg.contains("0.700"),
+                        "{from}..{to}: message lacks clip length: {msg}"
+                    )
                 }
                 other => panic!("{from}..{to}: expected BadRange, got {other:?}"),
             }

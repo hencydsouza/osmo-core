@@ -90,7 +90,11 @@ fn stbl(o: &Out) -> Vec<u8> {
         .into_iter()
         .flat_map(|(n, d)| [n, d])
         .collect();
-    body.extend(full(b"stts", 0, &[&(stts.len() as u32 / 2).to_be_bytes()[..], &u32s(stts)].concat()));
+    body.extend(full(
+        b"stts",
+        0,
+        &[&(stts.len() as u32 / 2).to_be_bytes()[..], &u32s(stts)].concat(),
+    ));
 
     if o.samples.iter().any(|s| s.cts_offset != 0) {
         let version = u32::from(o.samples.iter().any(|s| s.cts_offset < 0)) << 24;
@@ -98,7 +102,11 @@ fn stbl(o: &Out) -> Vec<u8> {
             .into_iter()
             .flat_map(|(n, d)| [n, d as u32])
             .collect();
-        body.extend(full(b"ctts", version, &[&(ctts.len() as u32 / 2).to_be_bytes()[..], &u32s(ctts)].concat()));
+        body.extend(full(
+            b"ctts",
+            version,
+            &[&(ctts.len() as u32 / 2).to_be_bytes()[..], &u32s(ctts)].concat(),
+        ));
     }
 
     if o.samples.iter().any(|s| !s.sync) {
@@ -109,14 +117,23 @@ fn stbl(o: &Out) -> Vec<u8> {
             .filter(|(_, s)| s.sync)
             .map(|(i, _)| i as u32 + 1)
             .collect();
-        body.extend(full(b"stss", 0, &[&(sync.len() as u32).to_be_bytes()[..], &u32s(sync)].concat()));
+        body.extend(full(
+            b"stss",
+            0,
+            &[&(sync.len() as u32).to_be_bytes()[..], &u32s(sync)].concat(),
+        ));
     }
 
     let sizes = u32s(o.samples.iter().map(|s| s.size));
     body.extend(full(
         b"stsz",
         0,
-        &[&0u32.to_be_bytes()[..], &(o.samples.len() as u32).to_be_bytes(), &sizes].concat(),
+        &[
+            &0u32.to_be_bytes()[..],
+            &(o.samples.len() as u32).to_be_bytes(),
+            &sizes,
+        ]
+        .concat(),
     ));
 
     let mut entries = Vec::new();
@@ -125,22 +142,39 @@ fn stbl(o: &Out) -> Vec<u8> {
         entries.extend([first, spc, 1]);
         first += n;
     }
-    body.extend(full(b"stsc", 0, &[&(entries.len() as u32 / 3).to_be_bytes()[..], &u32s(entries)].concat()));
+    body.extend(full(
+        b"stsc",
+        0,
+        &[
+            &(entries.len() as u32 / 3).to_be_bytes()[..],
+            &u32s(entries),
+        ]
+        .concat(),
+    ));
 
     // `co64` only when some chunk starts beyond what 32 bits can address.
     if o.offsets.iter().any(|&x| x > u64::from(u32::MAX)) {
         let offs: Vec<u8> = o.offsets.iter().flat_map(|x| x.to_be_bytes()).collect();
-        body.extend(full(b"co64", 0, &[&(o.offsets.len() as u32).to_be_bytes()[..], &offs].concat()));
+        body.extend(full(
+            b"co64",
+            0,
+            &[&(o.offsets.len() as u32).to_be_bytes()[..], &offs].concat(),
+        ));
     } else {
         let offs = u32s(o.offsets.iter().map(|&x| x as u32));
-        body.extend(full(b"stco", 0, &[&(o.offsets.len() as u32).to_be_bytes()[..], &offs].concat()));
+        body.extend(full(
+            b"stco",
+            0,
+            &[&(o.offsets.len() as u32).to_be_bytes()[..], &offs].concat(),
+        ));
     }
     bx(b"stbl", &body)
 }
 
 fn trak(o: &Out, movie_timescale: u32) -> (Vec<u8>, u64) {
     let media = media_duration(o);
-    let in_movie = (media as f64 / f64::from(o.track.timescale.max(1)) * f64::from(movie_timescale)).round() as u64;
+    let in_movie = (media as f64 / f64::from(o.track.timescale.max(1)) * f64::from(movie_timescale))
+        .round() as u64;
 
     let mut m = vec![0u8; 8]; // creation, modification
     m.extend(o.track.timescale.to_be_bytes());
@@ -236,13 +270,19 @@ fn write_all(
             let mut samples = track.samples[c.first..c.end].to_vec();
             if samples.len() == 1 {
                 // A lone sample (timecode) spans the whole original clip; shrink it to the cut.
-                samples[0].duration = (plan.duration_secs * f64::from(track.timescale)).round() as u32;
+                samples[0].duration =
+                    (plan.duration_secs * f64::from(track.timescale)).round() as u32;
             }
             let chunks = (0..samples.len())
                 .step_by(CHUNK_SAMPLES)
                 .map(|a| (a, (a + CHUNK_SAMPLES).min(samples.len())))
                 .collect::<Vec<_>>();
-            Out { track, samples, offsets: vec![0; chunks.len()], chunks }
+            Out {
+                track,
+                samples,
+                offsets: vec![0; chunks.len()],
+                chunks,
+            }
         })
         .collect();
 
@@ -250,14 +290,29 @@ fn write_all(
     let mut order: Vec<(f64, usize, usize)> = Vec::new();
     for (t, o) in outs.iter().enumerate() {
         for (c, &(a, _)) in o.chunks.iter().enumerate() {
-            order.push((o.samples[a].dts as f64 / f64::from(o.track.timescale.max(1)), t, c));
+            order.push((
+                o.samples[a].dts as f64 / f64::from(o.track.timescale.max(1)),
+                t,
+                c,
+            ));
         }
     }
     order.sort_by(|x, y| x.0.total_cmp(&y.0).then(x.1.cmp(&y.1)).then(x.2.cmp(&y.2)));
 
-    let payload: u64 = outs.iter().flat_map(|o| (0..o.chunks.len()).map(move |c| chunk_size(o, c))).sum();
-    let ftyp = if movie.ftyp.is_empty() { Vec::new() } else { bx(b"ftyp", &movie.ftyp) };
-    let mdat_header: u64 = if payload + 8 > u64::from(u32::MAX) { 16 } else { 8 };
+    let payload: u64 = outs
+        .iter()
+        .flat_map(|o| (0..o.chunks.len()).map(move |c| chunk_size(o, c)))
+        .sum();
+    let ftyp = if movie.ftyp.is_empty() {
+        Vec::new()
+    } else {
+        bx(b"ftyp", &movie.ftyp)
+    };
+    let mdat_header: u64 = if payload + 8 > u64::from(u32::MAX) {
+        16
+    } else {
+        8
+    };
     let mut pos = ftyp.len() as u64 + 8 + mdat_header;
     for &(_, t, c) in &order {
         outs[t].offsets[c] = pos;
@@ -273,7 +328,8 @@ fn write_all(
         file.write_all(b"mdat").map_err(io)?;
         file.write_all(&(payload + 16).to_be_bytes()).map_err(io)?;
     } else {
-        file.write_all(&((payload + 8) as u32).to_be_bytes()).map_err(io)?;
+        file.write_all(&((payload + 8) as u32).to_be_bytes())
+            .map_err(io)?;
         file.write_all(b"mdat").map_err(io)?;
     }
 
@@ -287,14 +343,18 @@ fn write_all(
             cur = match cur {
                 Some((off, len)) if off + len == s.offset => Some((off, len + u64::from(s.size))),
                 Some((off, len)) => {
-                    copy_range(src, &mut file, off, len, cancel, &mut done, payload, progress)?;
+                    copy_range(
+                        src, &mut file, off, len, cancel, &mut done, payload, progress,
+                    )?;
                     Some((s.offset, u64::from(s.size)))
                 }
                 None => Some((s.offset, u64::from(s.size))),
             };
         }
         if let Some((off, len)) = cur {
-            copy_range(src, &mut file, off, len, cancel, &mut done, payload, progress)?;
+            copy_range(
+                src, &mut file, off, len, cancel, &mut done, payload, progress,
+            )?;
         }
     }
 

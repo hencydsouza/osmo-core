@@ -970,6 +970,7 @@ name = "osmo-sdk"
 version = "0.1.0"
 dependencies = [
  "osmo-core",
+ "tempfile",
 ]
 
 [[package]]
