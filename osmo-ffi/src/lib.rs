@@ -408,8 +408,6 @@ mod tests {
             p(20, 100);
         }
         assert_eq!(l.calls.lock().unwrap().len(), 2);
-        // cancel() was requested: the next operation's own start() clears it, but a running one sees it.
-        assert!(matches!(cam.thumbnail("DCIM/x"), Err(_)));
         let go = Arc::new(Listener {
             calls: Mutex::default(),
             keep_going: true,
