@@ -2,22 +2,18 @@ mod ble_btleplug;
 
 use clap::{Parser, Subcommand, ValueEnum};
 use osmo_cli::listing::{
-    dest_filename, download_error_message, download_summary, file_from_path, fill_unknown_sizes,
-    format_listing, format_status, human_size, known_size, parse_utc_offset, progress_line,
-    resolve_requested, sidecars_to_fetch, thumb_sources, truncation_warning, validate_get_path,
-    zone_from_link, LsFilter, ThumbSource,
+    dest_filename, download_summary, format_listing, human_size, parse_utc_offset, progress_line,
+    validate_get_path, zone_from_link, LsFilter,
 };
-use osmo_cli::listing::{filter_files, format_marks, Kind};
+use osmo_cli::listing::{format_marks, Kind};
 use osmo_cli::{cameras, config, route::route_warning};
 use osmo_core::ble::{
     model_name, pair_and_read_wifi, start_livestream_cancellable, PairOptions, StreamConfig,
     WifiCreds,
 };
-use osmo_core::datalink::{has_media_records, CameraSession, SessionConfig, SessionError};
-use osmo_core::embedded_jpeg::{embedded_jpeg, image_kind, HEAD_BYTES};
-use osmo_core::http::{HttpClient, Outcome};
+use osmo_core::datalink::{CameraSession, SessionConfig, SessionError};
+use osmo_core::embedded_jpeg::image_kind;
 use osmo_core::media::url_path;
-use osmo_core::media::CameraFile;
 use std::ffi::OsString;
 use std::io::{BufRead, Read};
 use std::net::{IpAddr, UdpSocket};
@@ -355,27 +351,6 @@ fn warn_if_unconfirmed(s: &CameraSession<osmo_core::datalink::UdpPeer>) {
     }
 }
 
-fn list_pages(
-    s: &mut CameraSession<osmo_core::datalink::UdpPeer>,
-    all: bool,
-) -> Result<Vec<CameraFile>, SessionError> {
-    let mut files = s.list_newest()?;
-    if all {
-        // A page cap guards against a camera that keeps answering with files we have not seen.
-        for _ in 0..500 {
-            if !s.more_available() {
-                break;
-            }
-            let next = s.list_next_page()?;
-            if next.is_empty() {
-                break;
-            }
-            files.extend(next);
-        }
-    }
-    Ok(files)
-}
-
 fn ls_cmd(
     ip: &str,
     port: u16,
@@ -385,43 +360,26 @@ fn ls_cmd(
     filter: LsFilter,
     verbose: bool,
 ) -> Result<(), String> {
-    let mut s = open_session(ip, port, verbose)?;
-    s.set_highlights_only(filter.highlights);
-    if let Some(n) = page_size {
-        s.set_page_size(n);
-    }
+    let cam = sdk_camera(ip, port, verbose);
     eprintln!("Listing {ip}:{port} ...");
-    let files = list_pages(&mut s, all).map_err(session_err);
-    warn_if_unconfirmed(&s);
-    if let Some(w) = truncation_warning(s.diagnostics().truncated) {
-        eprintln!("warning: {w}");
+    let report = cam.list_report(&filter, all, page_size).map_err(sdk_err)?;
+    if !report.status.is_empty() {
+        eprintln!("{}", report.status);
     }
-    let status_line = format_status(s.status());
-    if !status_line.is_empty() {
-        eprintln!("{status_line}");
-    }
-    let files = files.map(|mut f| {
-        let http = HttpClient::new(ip);
-        fill_unknown_sizes(&mut f, &mut |x| http.head(&x.url_path()));
-        f
-    });
     if let Some(path) = dump {
-        if has_media_records(s.last_blob()) {
-            std::fs::write(path, s.last_blob())
-                .map_err(|e| format!("could not write {}: {e}", path.display()))?;
-            eprintln!("Raw manifest saved to {}", path.display());
-        } else {
-            eprintln!(
+        match &report.manifest {
+            Some(blob) => {
+                std::fs::write(path, blob)
+                    .map_err(|e| format!("could not write {}: {e}", path.display()))?;
+                eprintln!("Raw manifest saved to {}", path.display());
+            }
+            None => eprintln!(
                 "Not saving {}: this run captured no media records (keeping any earlier dump).",
                 path.display()
-            );
+            ),
         }
     }
-    s.close();
-    println!(
-        "{}",
-        format_listing(&filter_files(&files?, filter.kind, filter.starred))
-    );
+    println!("{}", format_listing(&report.files));
     Ok(())
 }
 
@@ -697,54 +655,22 @@ fn thumb_cmd(
     verbose: bool,
 ) -> Result<(), String> {
     let path = validate_get_path(path)?;
-    let (file, _session) = match storage {
-        Some(s) => {
-            warn_route(ip, port);
-            (file_from_path(s, path), None)
-        }
-        None => {
-            let mut sess = open_session(ip, port, verbose)?;
-            eprintln!("Looking up {path} ...");
-            let found = sess.find_file(path).map_err(session_err)?;
-            warn_if_unconfirmed(&sess);
-            let f = found.ok_or("not found anywhere in the camera's library: check the path against `osmo ls --all`")?;
-            (f, Some(sess))
-        }
-    };
-    let http = HttpClient::new(ip);
-    let mut tried = Vec::new();
-    let mut saved = None;
-    for src in thumb_sources(&file) {
-        let (label, bytes) = match &src {
-            ThumbSource::Whole(p) => (p.clone(), http.get_bytes(p)),
-            ThumbSource::EmbeddedHead(p) => (
-                format!("{p} (embedded EXIF)"),
-                http.get_range(p, 0, HEAD_BYTES as u64 - 1)
-                    .and_then(|head| embedded_jpeg(&head)),
-            ),
-        };
-        match bytes.as_deref().and_then(image_kind) {
-            Some(kind) => {
-                saved = Some((label, kind, bytes.unwrap_or_default()));
-                break;
-            }
-            None => tried.push(label),
-        }
+    let cam = sdk_camera(ip, port, verbose);
+    if storage.is_none() {
+        eprintln!("Looking up {path} ...");
     }
-    let (label, kind, bytes) = saved.ok_or_else(|| {
-        format!(
-            "no thumbnail available for {path} (tried: {})",
-            tried.join(", ")
-        )
-    })?;
+    let thumb = cam.thumbnail_from(path, storage).map_err(sdk_err)?;
+    let kind = image_kind(&thumb.bytes).unwrap_or("image");
     if let Some(dir) = out.parent().filter(|d| !d.as_os_str().is_empty()) {
         std::fs::create_dir_all(dir).map_err(|e| e.to_string())?;
     }
-    std::fs::write(out, &bytes).map_err(|e| format!("could not write {}: {e}", out.display()))?;
+    std::fs::write(out, &thumb.bytes)
+        .map_err(|e| format!("could not write {}: {e}", out.display()))?;
     println!(
-        "Saved {} ({}, {kind}, from {label})",
+        "Saved {} ({}, {kind}, from {})",
         out.display(),
-        human_size(bytes.len() as u64)
+        human_size(thumb.bytes.len() as u64),
+        thumb.label
     );
     Ok(())
 }
@@ -786,175 +712,77 @@ fn release_datalink((stop, handle): Held) {
     }
 }
 
-fn download_one(
-    http: &HttpClient,
-    out: &std::path::Path,
-    storage: u8,
-    path: &str,
-    size: Option<u64>,
-    sidecars: bool,
-) -> Result<Outcome, osmo_core::http::DownloadError> {
-    let dest = out.join(dest_filename(path));
+fn get_cmd(paths: &[String], out: &std::path::Path, opts: GetOpts) -> Result<(), String> {
+    use osmo_sdk::camera::{GetEvent, GetOptions};
+    let cam = sdk_camera(opts.ip, opts.port, opts.verbose);
     let mut last = Instant::now() - Duration::from_secs(1);
-    let result = http.download_resumable(&url_path(storage, path), &dest, size, &mut |n| {
+    let main_progress = |done: u64, size: Option<u64>, last: &mut Instant| {
         if last.elapsed() >= Duration::from_millis(250) {
-            eprint!("\r{}      ", progress_line(n, size));
-            last = Instant::now();
-        }
-    });
-    let final_len = std::fs::metadata(&dest).map(|m| m.len()).unwrap_or(0);
-    eprintln!("\r{}      ", progress_line(final_len, size));
-
-    if sidecars && result.is_ok() {
-        let file = file_from_path(storage, path);
-        let found = sidecars_to_fetch(&file, &mut |u| http.head(u));
-        if found.is_empty() {
-            println!("no sidecar");
-        }
-        for (sidecar, n) in found {
-            let dest = out.join(dest_filename(&sidecar));
-            let mut last = Instant::now() - Duration::from_secs(1);
-            let r =
-                http.download_resumable(&url_path(storage, &sidecar), &dest, Some(n), &mut |d| {
-                    if last.elapsed() >= Duration::from_millis(250) {
-                        eprint!("\r{}      ", progress_line(d, Some(n)));
-                        last = Instant::now();
-                    }
-                });
-            eprintln!();
-            match r {
-                Ok(_) => println!("Saved sidecar {}", dest.display()),
-                Err(e) => eprintln!("sidecar {sidecar}: {}", download_error_message(&e)),
-            }
-        }
-    }
-    match &result {
-        Ok(Outcome::Saved) => println!("Saved {}", dest.display()),
-        Ok(Outcome::AlreadyComplete) => println!("Already complete: {}", dest.display()),
-        Err(_) => {}
-    }
-    result
-}
-
-fn get_cmd(paths: &[String], out: &PathBuf, opts: GetOpts) -> Result<(), String> {
-    let GetOpts {
-        ip,
-        port,
-        storage,
-        keepalive,
-        sidecars,
-        proxy,
-        verbose,
-    } = opts;
-    let paths: Vec<&str> = paths
-        .iter()
-        .map(|p| validate_get_path(p))
-        .collect::<Result<_, _>>()?;
-    let http = HttpClient::new(ip);
-    if verbose {
-        http.set_logger(|l| eprintln!("  {l}"));
-    }
-    // (path, store, known size)
-    let mut jobs: Vec<(String, u8, Option<u64>)> = Vec::new();
-    let mut not_found = 0usize;
-    let session = match storage {
-        Some(s) => {
-            warn_route(ip, port);
-            for p in &paths {
-                jobs.push((p.to_string(), s, http.head(&url_path(s, p))));
-            }
-            None
-        }
-        None => {
-            let mut sess = open_session(ip, port, verbose)?;
-            eprintln!("Looking up {} file(s) ...", paths.len());
-            let files = if let [p] = paths[..] {
-                sess.find_file(p)
-                    .map_err(session_err)?
-                    .into_iter()
-                    .collect()
-            } else {
-                list_pages(&mut sess, true).map_err(session_err)?
-            };
-            warn_if_unconfirmed(&sess);
-            let requested: Vec<String> = paths.iter().map(|p| p.to_string()).collect();
-            let (found, missing) = resolve_requested(&files, &requested);
-            for m in &missing {
-                eprintln!("not found anywhere in the camera's library: {m} (check it against `osmo ls --all`)");
-            }
-            not_found = missing.len();
-            for f in found {
-                jobs.push((
-                    f.path.clone(),
-                    f.storage,
-                    known_size(f, || http.head(&f.url_path())),
-                ));
-            }
-            Some(sess)
+            eprint!("\r{}      ", progress_line(done, size));
+            *last = Instant::now();
         }
     };
-    if proxy {
-        let mut swapped = Vec::new();
-        for (path, store, _) in jobs {
-            match osmo_cli::listing::proxy_job(&path, store, |u| http.head(u)) {
-                Ok(job) => swapped.push(job),
-                Err(why) => {
-                    eprintln!("{why}");
-                    not_found += 1;
-                }
-            }
-        }
-        jobs = swapped;
-    }
-    if jobs.is_empty() {
-        if let Some(mut s) = session {
-            s.close();
-        }
-        return Err("nothing to download".to_string());
-    }
-
-    std::fs::create_dir_all(out).map_err(|e| e.to_string())?;
-    let held = match session {
-        Some(s) if keepalive => Some(hold_datalink(s)),
-        Some(mut s) => {
-            s.close();
-            None
-        }
-        None => None,
-    };
-
-    let (mut saved, mut skipped, mut failed) = (0, 0, not_found);
-    let total = jobs.len();
-    for (n, (path, store, size)) in jobs.iter().enumerate() {
-        if total > 1 {
-            eprintln!("[{}/{}] {path}", n + 1, total);
-        }
-        match download_one(&http, out, *store, path, *size, sidecars) {
-            Ok(Outcome::Saved) => saved += 1,
-            Ok(Outcome::AlreadyComplete) => skipped += 1,
-            Err(e) => {
-                failed += 1;
-                eprintln!("failed {path}: {}", download_error_message(&e));
-                if matches!(e, osmo_core::http::DownloadError::Stalled { .. }) {
-                    let left = total - n - 1;
-                    if left > 0 {
-                        eprintln!("stopping: {left} file(s) not tried; the camera's WiFi is probably gone");
-                        failed += left;
+    let report = cam
+        .download_many(
+            paths,
+            out,
+            GetOptions {
+                storage: opts.storage,
+                keepalive: opts.keepalive,
+                sidecars: opts.sidecars,
+                proxy: opts.proxy,
+            },
+            &mut |ev| match ev {
+                GetEvent::Lookup(n) => eprintln!("Looking up {n} file(s) ..."),
+                GetEvent::NotFound(m) => eprintln!(
+                    "not found anywhere in the camera's library: {m} (check it against `osmo ls --all`)"
+                ),
+                GetEvent::NoProxy(why) => eprintln!("{why}"),
+                GetEvent::Start { index, total, path } => {
+                    last = Instant::now() - Duration::from_secs(1);
+                    if total > 1 {
+                        eprintln!("[{}/{}] {path}", index + 1, total);
                     }
-                    break;
                 }
-            }
-        }
+                GetEvent::Progress { done, size } => main_progress(done, size, &mut last),
+                GetEvent::FileDone { dest, size } => {
+                    let len = std::fs::metadata(&dest).map(|m| m.len()).unwrap_or(0);
+                    eprintln!("\r{}      ", progress_line(len, size));
+                }
+                GetEvent::NoSidecar => println!("no sidecar"),
+                GetEvent::SidecarProgress { done, size } => {
+                    main_progress(done, Some(size), &mut last)
+                }
+                GetEvent::SidecarSaved(dest) => {
+                    eprintln!();
+                    println!("Saved sidecar {}", dest.display());
+                    last = Instant::now() - Duration::from_secs(1);
+                }
+                GetEvent::SidecarFailed { name, message } => {
+                    eprintln!();
+                    eprintln!("sidecar {name}: {message}");
+                    last = Instant::now() - Duration::from_secs(1);
+                }
+                GetEvent::Saved(dest) => println!("Saved {}", dest.display()),
+                GetEvent::AlreadyComplete(dest) => println!("Already complete: {}", dest.display()),
+                GetEvent::Failed { path, message } => {
+                    eprintln!();
+                    eprintln!("failed {path}: {message}")
+                }
+                GetEvent::Stopping { left } => eprintln!(
+                    "stopping: {left} file(s) not tried; the camera's WiFi is probably gone"
+                ),
+            },
+        )
+        .map_err(sdk_err)?;
+    if report.total > 1 || report.not_found > 0 {
+        println!(
+            "{}",
+            download_summary(report.saved, report.skipped, report.failed)
+        );
     }
-
-    if let Some(h) = held {
-        release_datalink(h);
-    }
-    if total > 1 || not_found > 0 {
-        println!("{}", download_summary(saved, skipped, failed));
-    }
-    if failed > 0 {
-        return Err(format!("{failed} file(s) not downloaded"));
+    if report.failed > 0 {
+        return Err(format!("{} file(s) not downloaded", report.failed));
     }
     Ok(())
 }

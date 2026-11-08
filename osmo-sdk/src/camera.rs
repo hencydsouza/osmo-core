@@ -3,12 +3,13 @@
 //! the notice callback instead of stderr.
 use crate::http_range::HttpRangeSource;
 use crate::listing::{
-    dest_filename, download_error_message, fill_unknown_sizes, filter_files, find_file, known_size,
-    plan_deletions, sidecars_to_fetch, thumb_sources, truncation_warning, validate_get_path,
-    LsFilter, ThumbSource,
+    dest_filename, download_error_message, file_from_path, fill_unknown_sizes, filter_files,
+    find_file, format_status, known_size, plan_deletions, proxy_job, resolve_requested,
+    sidecars_to_fetch, thumb_sources, truncation_warning, validate_get_path, LsFilter, ThumbSource,
 };
 use osmo_core::datalink::{
-    tcp_poke_to, CameraSession, Datagram, SessionError, Timing, UdpPeer, WriteError,
+    has_media_records, tcp_poke_to, CameraSession, Datagram, SessionError, Timing, UdpPeer,
+    WriteError,
 };
 use osmo_core::embedded_jpeg::{embedded_jpeg, image_kind, HEAD_BYTES};
 use osmo_core::http::{DownloadError, HttpClient, Outcome};
@@ -82,6 +83,86 @@ pub struct DownloadOutcome {
     /// The file was already fully on disk, so nothing was fetched.
     pub already_complete: bool,
     pub bytes: u64,
+}
+
+/// What `list_report` returns beyond the files.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ListReport {
+    pub files: Vec<CameraFile>,
+    /// Battery, free space and so on, one line; empty when the camera reported none.
+    pub status: String,
+    /// The raw manifest of the last page, when it held media records.
+    pub manifest: Option<Vec<u8>>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Thumbnail {
+    pub bytes: Vec<u8>,
+    /// The camera path the image came from.
+    pub label: String,
+}
+
+#[derive(Debug, Clone, Copy, Default)]
+pub struct GetOptions {
+    /// Skip the library lookup and assume every file is on this card.
+    pub storage: Option<u8>,
+    /// Keep the datalink alive during the transfer.
+    pub keepalive: bool,
+    pub sidecars: bool,
+    /// Fetch the low-res proxy of each video instead.
+    pub proxy: bool,
+}
+
+/// Progress of `download_many`, in the order it happens.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum GetEvent {
+    /// About to look this many files up in the camera's library.
+    Lookup(usize),
+    NotFound(String),
+    NoProxy(String),
+    Start {
+        index: usize,
+        total: usize,
+        path: String,
+    },
+    Progress {
+        done: u64,
+        size: Option<u64>,
+    },
+    /// The main file finished transferring (its sidecars, if any, come next).
+    FileDone {
+        dest: PathBuf,
+        size: Option<u64>,
+    },
+    NoSidecar,
+    SidecarProgress {
+        done: u64,
+        size: u64,
+    },
+    SidecarSaved(PathBuf),
+    SidecarFailed {
+        name: String,
+        message: String,
+    },
+    Saved(PathBuf),
+    AlreadyComplete(PathBuf),
+    Failed {
+        path: String,
+        message: String,
+    },
+    /// A stalled transfer ended the run; this many files were not tried.
+    Stopping {
+        left: usize,
+    },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct GetReport {
+    pub saved: usize,
+    pub skipped: usize,
+    pub failed: usize,
+    pub total: usize,
+    pub not_found: usize,
 }
 
 /// Where the write counter lives between runs. The camera ignores a write whose counter it has already
@@ -290,6 +371,16 @@ impl Camera {
         all: bool,
         page_size: Option<u8>,
     ) -> Result<Vec<CameraFile>, SdkError> {
+        self.list_report(filter, all, page_size).map(|r| r.files)
+    }
+
+    /// `list` plus what the CLI also shows: the camera's status line and the raw manifest of the last page.
+    pub fn list_report(
+        &self,
+        filter: &LsFilter,
+        all: bool,
+        page_size: Option<u8>,
+    ) -> Result<ListReport, SdkError> {
         self.start();
         let mut s = self.session()?;
         s.set_highlights_only(filter.highlights);
@@ -301,23 +392,46 @@ impl Camera {
         if let Some(w) = truncation_warning(s.diagnostics().truncated) {
             self.say(&w);
         }
+        let status = format_status(s.status());
+        let manifest = has_media_records(s.last_blob()).then(|| s.last_blob().to_vec());
         s.close();
         let mut files = files?;
         let http = self.http();
         fill_unknown_sizes(&mut files, &mut |x| http.head(&x.url_path()));
-        Ok(filter_files(&files, filter.kind, filter.starred))
+        Ok(ListReport {
+            files: filter_files(&files, filter.kind, filter.starred),
+            status,
+            manifest,
+        })
     }
 
     /// The image for `path`: its screennail or thumbnail, else the JPEG embedded in a still.
     pub fn thumbnail(&self, path: &str) -> Result<Vec<u8>, SdkError> {
+        self.thumbnail_from(path, None).map(|t| t.bytes)
+    }
+
+    /// Like `thumbnail`, also saying where the image came from. With `storage` the camera's library is not
+    /// consulted and the file is assumed to be on that card.
+    pub fn thumbnail_from(&self, path: &str, storage: Option<u8>) -> Result<Thumbnail, SdkError> {
         self.start();
         let path = validate_get_path(path).map_err(SdkError::NotFound)?;
-        let mut s = self.session()?;
-        let file = self.lookup(&mut s, path)?;
+        let (file, session) = match storage {
+            Some(st) => (file_from_path(st, path), None),
+            None => {
+                let mut s = self.session()?;
+                (self.lookup(&mut s, path)?, Some(s))
+            }
+        };
         let http = self.http();
         let mut tried = Vec::new();
+        let mut found = None;
         for src in thumb_sources(&file) {
-            self.check_cancel()?;
+            if let Err(e) = self.check_cancel() {
+                if let Some(mut s) = session {
+                    s.close();
+                }
+                return Err(e);
+            }
             let (label, bytes) = match &src {
                 ThumbSource::Whole(p) => (p.clone(), http.get_bytes(p)),
                 ThumbSource::EmbeddedHead(p) => (
@@ -326,17 +440,23 @@ impl Camera {
                         .and_then(|head| embedded_jpeg(&head)),
                 ),
             };
-            if let Some(b) = bytes.filter(|b| image_kind(b).is_some()) {
-                s.close();
-                return Ok(b);
+            match bytes.filter(|b| image_kind(b).is_some()) {
+                Some(bytes) => {
+                    found = Some(Thumbnail { bytes, label });
+                    break;
+                }
+                None => tried.push(label),
             }
-            tried.push(label);
         }
-        s.close();
-        Err(SdkError::NotFound(format!(
-            "no thumbnail available for {path} (tried: {})",
-            tried.join(", ")
-        )))
+        if let Some(mut s) = session {
+            s.close();
+        }
+        found.ok_or_else(|| {
+            SdkError::NotFound(format!(
+                "no thumbnail available for {path} (tried: {})",
+                tried.join(", ")
+            ))
+        })
     }
 
     /// Download `path` into `dest_dir`, resuming a partial file. `progress` gets (bytes so far, total or 0).
@@ -384,6 +504,167 @@ impl Camera {
             already_complete: outcome == Outcome::AlreadyComplete,
             dest,
         })
+    }
+
+    /// Download several files with one library lookup: resumable, optionally with sidecars or low-res proxies.
+    /// Per-file failures are counted in the report; the run ends early when the camera's Wi-Fi is gone.
+    pub fn download_many(
+        &self,
+        paths: &[String],
+        dest_dir: &Path,
+        opts: GetOptions,
+        on: &mut dyn FnMut(GetEvent),
+    ) -> Result<GetReport, SdkError> {
+        self.start();
+        let paths: Vec<&str> = paths
+            .iter()
+            .map(|p| validate_get_path(p).map_err(SdkError::NotFound))
+            .collect::<Result<_, _>>()?;
+        let http = self.http();
+        // (path, store, known size)
+        let mut jobs: Vec<(String, u8, Option<u64>)> = Vec::new();
+        let mut not_found = 0usize;
+        let session = match opts.storage {
+            Some(st) => {
+                for p in &paths {
+                    jobs.push((p.to_string(), st, http.head(&url_path(st, p))));
+                }
+                None
+            }
+            None => {
+                let mut sess = self.session()?;
+                on(GetEvent::Lookup(paths.len()));
+                let files = if let [p] = paths[..] {
+                    sess.find_file(p)?.into_iter().collect()
+                } else {
+                    self.list_pages(&mut sess, true)?
+                };
+                self.warn_if_unconfirmed(&sess);
+                let requested: Vec<String> = paths.iter().map(|p| p.to_string()).collect();
+                let (found, missing) = resolve_requested(&files, &requested);
+                for m in &missing {
+                    on(GetEvent::NotFound(m.clone()));
+                }
+                not_found = missing.len();
+                for f in found {
+                    jobs.push((
+                        f.path.clone(),
+                        f.storage,
+                        known_size(f, || http.head(&f.url_path())),
+                    ));
+                }
+                Some(sess)
+            }
+        };
+        if opts.proxy {
+            let mut swapped = Vec::new();
+            for (path, store, _) in jobs {
+                match proxy_job(&path, store, |u| http.head(u)) {
+                    Ok(job) => swapped.push(job),
+                    Err(why) => {
+                        on(GetEvent::NoProxy(why));
+                        not_found += 1;
+                    }
+                }
+            }
+            jobs = swapped;
+        }
+        if jobs.is_empty() {
+            if let Some(mut s) = session {
+                s.close();
+            }
+            return Err(SdkError::NotFound("nothing to download".to_string()));
+        }
+        std::fs::create_dir_all(dest_dir).map_err(|e| SdkError::Io(e.to_string()))?;
+        let held = match session {
+            Some(s) if opts.keepalive => Some(Held::start(s)),
+            Some(mut s) => {
+                s.close();
+                None
+            }
+            None => None,
+        };
+
+        let total = jobs.len();
+        let mut report = GetReport {
+            total,
+            not_found,
+            failed: not_found,
+            ..GetReport::default()
+        };
+        for (n, (path, store, size)) in jobs.iter().enumerate() {
+            on(GetEvent::Start {
+                index: n,
+                total,
+                path: path.clone(),
+            });
+            let dest = dest_dir.join(dest_filename(path));
+            let result = http.download_resumable(&url_path(*store, path), &dest, *size, &mut |d| {
+                on(GetEvent::Progress {
+                    done: d,
+                    size: *size,
+                })
+            });
+            match result {
+                Ok(outcome) => {
+                    on(GetEvent::FileDone {
+                        dest: dest.clone(),
+                        size: *size,
+                    });
+                    if opts.sidecars {
+                        let file = file_from_path(*store, path);
+                        let found = sidecars_to_fetch(&file, &mut |u| http.head(u));
+                        if found.is_empty() {
+                            on(GetEvent::NoSidecar);
+                        }
+                        for (sidecar, len) in found {
+                            let to = dest_dir.join(dest_filename(&sidecar));
+                            let r = http.download_resumable(
+                                &url_path(*store, &sidecar),
+                                &to,
+                                Some(len),
+                                &mut |d| on(GetEvent::SidecarProgress { done: d, size: len }),
+                            );
+                            match r {
+                                Ok(_) => on(GetEvent::SidecarSaved(to)),
+                                Err(e) => on(GetEvent::SidecarFailed {
+                                    name: sidecar,
+                                    message: download_error_message(&e),
+                                }),
+                            }
+                        }
+                    }
+                    if outcome == Outcome::AlreadyComplete {
+                        report.skipped += 1;
+                        on(GetEvent::AlreadyComplete(dest));
+                    } else {
+                        report.saved += 1;
+                        on(GetEvent::Saved(dest));
+                    }
+                }
+                Err(e) => {
+                    report.failed += 1;
+                    on(GetEvent::Failed {
+                        path: path.clone(),
+                        message: download_error_message(&e),
+                    });
+                    let stop =
+                        matches!(e, DownloadError::Stalled { .. } | DownloadError::Cancelled);
+                    if stop {
+                        let left = total - n - 1;
+                        if left > 0 && !matches!(e, DownloadError::Cancelled) {
+                            on(GetEvent::Stopping { left });
+                            report.failed += left;
+                        }
+                        break;
+                    }
+                }
+            }
+        }
+        if let Some(h) = held {
+            h.release();
+        }
+        Ok(report)
     }
 
     pub fn set_favourite(&self, path: &str, on: bool) -> Result<(), SdkError> {
