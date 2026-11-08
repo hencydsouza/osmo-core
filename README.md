@@ -13,6 +13,8 @@ see `NOTICE` and `docs/protocol.md`.
 
 - `osmo-core/` - the library. No async runtime and no OS types in its public API; BLE and UDP sit behind the
   small `BleLink` and `Datagram` traits, so Android/Swift/desktop shells can plug in their own.
+- `osmo-sdk/` - camera operations (list, download, favourite, delete, pure-Rust trim) shared by the CLI and apps.
+- `osmo-ffi/` - UniFFI wrapper producing Swift/Kotlin/C# bindings. See `docs/sdk.md`; tests in `sdk-tests/`.
 - `osmo-cli/` - the `osmo` binary (btleplug for desktop Bluetooth).
 
 Seams today: BLE is behind `BleLink` and the UDP datalink behind `Datagram`. HTTP (`ureq`) and the TCP poke use
