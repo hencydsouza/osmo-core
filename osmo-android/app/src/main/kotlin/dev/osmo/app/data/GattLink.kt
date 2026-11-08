@@ -26,7 +26,7 @@ private val CCCD = u16(0x2902)
  * notifications on fff4/fff5, arm pairing, then move DUML bytes. All methods block; call from a worker thread.
  */
 @SuppressLint("MissingPermission")
-class GattLink(private val ctx: Context, private val device: BluetoothDevice) : BleLink, AutoCloseable {
+class GattLink(private val ctx: Context, private val device: BluetoothDevice, private val armPairing: Boolean = true) : BleLink, AutoCloseable {
     private sealed interface Ev {
         data class Connected(val ok: Boolean) : Ev
         data class Services(val ok: Boolean) : Ev
@@ -85,8 +85,11 @@ class GattLink(private val ctx: Context, private val device: BluetoothDevice) : 
         subscribe(g, c4)
         subscribe(g, c5)
         // DUML pairing arm, same bytes as the CLI (osmo-cli/src/ble_btleplug.rs).
-        write(g, c4, byteArrayOf(0x01, 0x00), BluetoothGattCharacteristic.WRITE_TYPE_DEFAULT)
-        if (!await<Ev.Wrote>("pairing arm").ok) throw OsmoException.Ble("could not arm pairing")
+        // GPS sync (R-SDK) talks to an already-paired camera and must not arm pairing.
+        if (armPairing) {
+            write(g, c4, byteArrayOf(0x01, 0x00), BluetoothGattCharacteristic.WRITE_TYPE_DEFAULT)
+            if (!await<Ev.Wrote>("pairing arm").ok) throw OsmoException.Ble("could not arm pairing")
+        }
     }
 
     private fun subscribe(g: BluetoothGatt, c: BluetoothGattCharacteristic) {

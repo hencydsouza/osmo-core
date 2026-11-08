@@ -28,6 +28,7 @@ import uniffi.osmo_ffi.sdkVersion
 @Serializable data object Connect : NavKey
 @Serializable data object Library : NavKey
 @Serializable data object Local : NavKey
+@Serializable data object Gps : NavKey
 @Serializable data class Detail(val path: String, val sizeBytes: Long, val starred: Boolean, val video: Boolean, val storage: Int) : NavKey
 
 private fun Detail.file() = MediaFile(path, sizeBytes.toULong(), starred, if (video) MediaKind.VIDEO else MediaKind.PHOTO, storage.toUByte())
@@ -46,7 +47,7 @@ fun OsmoNav() {
         entryProvider = entryProvider {
             entry<Connect> {
                 val vm: ConnectViewModel = viewModel(factory = repoFactory)
-                ConnectScreen(vm, sdkVersion(), onLocal = { backStack.add(Local) }) { backStack.add(Library) }
+                ConnectScreen(vm, sdkVersion(), onLocal = { backStack.add(Local) }, onGps = { backStack.add(Gps) }) { backStack.add(Library) }
             }
             entry<Library> {
                 val vm: LibraryViewModel = viewModel(factory = repoFactory)
@@ -56,6 +57,10 @@ fun OsmoNav() {
                     onLocal = { backStack.add(Local) },
                     onBack = { backStack.removeLastOrNull() },
                 )
+            }
+            entry<Gps> {
+                val app = androidx.compose.ui.platform.LocalContext.current.applicationContext as OsmoApp
+                dev.osmo.app.ui.gps.GpsScreen(app.gps) { backStack.removeLastOrNull() }
             }
             entry<Local> {
                 val vm: LocalViewModel = viewModel(factory = repoFactory)

@@ -1,4 +1,4 @@
-@file:OptIn(androidx.compose.material3.ExperimentalMaterial3ExpressiveApi::class)
+@file:OptIn(androidx.compose.material3.ExperimentalMaterial3ExpressiveApi::class, androidx.compose.foundation.layout.ExperimentalLayoutApi::class)
 
 package dev.osmo.app.ui.detail
 
@@ -105,6 +105,9 @@ class DetailViewModel(private val repo: CameraRepository, val file: MediaFile) :
     private var job: Job? = null
     suspend fun thumbnail() = repo.thumbnail(file)
     suspend fun streamUrl(proxy: Boolean) = repo.streamUrl(file, proxy)
+    suspend fun highlights(): List<UInt> = runCatching { repo.highlights(file.path) }.getOrDefault(emptyList())
+    val sidecars = repo.sidecars
+    fun setSidecars(on: Boolean) = repo.setSidecars(on)
 
     private fun run(label: String, block: suspend () -> String) {
         if (job?.isActive == true) return
@@ -289,6 +292,15 @@ fun DetailScreen(vm: DetailViewModel, onBack: () -> Unit) {
                 Text("Download to phone", Modifier.padding(start = 12.dp), style = MaterialTheme.typography.titleMedium)
             }
 
+            val withSidecars by vm.sidecars.collectAsStateWithLifecycle()
+            Row(Modifier.padding(horizontal = 24.dp).fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                Column(Modifier.weight(1f)) {
+                    Text("Also get DNG and proxy files", style = MaterialTheme.typography.bodyLarge)
+                    Text("Downloads the RAW or low-res file kept next to this one, when there is one.", style = MaterialTheme.typography.bodySmall, color = scheme.onSurfaceVariant)
+                }
+                androidx.compose.material3.Switch(checked = withSidecars, onCheckedChange = vm::setSidecars, enabled = idle)
+            }
+
             if (video && durationMs > 0) {
                 val total = durationMs / 1000f
                 val fromS = range.start * total
@@ -301,6 +313,23 @@ fun DetailScreen(vm: DetailViewModel, onBack: () -> Unit) {
                             value = range, onValueChange = { range = it; player?.seekTo((it.start * durationMs).toLong()) },
                             enabled = idle,
                         )
+                        val marks by produceState(emptyList<UInt>(), vm) { value = vm.highlights() }
+                        if (marks.isNotEmpty()) {
+                            Text("Highlights you marked", style = MaterialTheme.typography.labelLarge, color = scheme.onSurfaceVariant)
+                            androidx.compose.foundation.layout.FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                                marks.forEach { ms ->
+                                    androidx.compose.material3.AssistChip(
+                                        onClick = {
+                                            val f = (ms.toLong().toFloat() / durationMs).coerceIn(0f, 1f)
+                                            range = f.coerceAtMost(range.endInclusive - 0.01f).coerceAtLeast(0f)..range.endInclusive
+                                            player?.seekTo(ms.toLong())
+                                        },
+                                        label = { Text(clock(ms.toLong())) },
+                                        leadingIcon = { Icon(Icons.Filled.Star, null, tint = scheme.tertiary) },
+                                    )
+                                }
+                            }
+                        }
                         Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
                             Text(clock((fromS * 1000).toLong()), style = MaterialTheme.typography.labelLarge)
                             Text("${"%.1f".format(toS - fromS)} s", style = MaterialTheme.typography.labelLarge, color = scheme.primary)

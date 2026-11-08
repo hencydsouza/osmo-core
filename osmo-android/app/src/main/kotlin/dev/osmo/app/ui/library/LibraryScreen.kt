@@ -50,6 +50,7 @@ import androidx.compose.material3.TopAppBar
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.setValue
 import androidx.compose.runtime.produceState
 import androidx.compose.runtime.remember
 import androidx.compose.ui.Alignment
@@ -89,6 +90,7 @@ class LibraryViewModel(private val repo: CameraRepository) : ViewModel() {
     private val _s = MutableStateFlow(LibraryState())
     val state = _s
     suspend fun thumbnail(f: MediaFile) = repo.thumbnail(f)
+    suspend fun status() = runCatching { repo.status() }.getOrNull()
 
     fun refresh() {
         _s.update { it.copy(loading = true, message = null) }
@@ -159,6 +161,8 @@ fun LibraryScreen(vm: LibraryViewModel, onOpen: (MediaFile) -> Unit, onLocal: ()
     val s by vm.state.collectAsStateWithLifecycle()
     val snack = remember { SnackbarHostState() }
     LaunchedEffect(Unit) { if (vm.state.value.files.isEmpty()) vm.refresh() }
+    var cam by remember { androidx.compose.runtime.mutableStateOf<uniffi.osmo_ffi.CameraStatus?>(null) }
+    LaunchedEffect(Unit) { while (true) { vm.status()?.let { cam = it }; kotlinx.coroutines.delay(5000) } }
     LaunchedEffect(s.message) { s.message?.let { snack.showSnackbar(it); vm.consumeMessage() } }
 
     Scaffold(
@@ -169,7 +173,14 @@ fun LibraryScreen(vm: LibraryViewModel, onOpen: (MediaFile) -> Unit, onLocal: ()
                     Column {
                         Text(if (s.selected.isEmpty()) "Library" else "${s.selected.size} selected", style = MaterialTheme.typography.titleLarge)
                         if (s.selected.isEmpty() && s.files.isNotEmpty()) {
-                            Text("${s.files.size} on camera", style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                            val c = cam
+                            val parts = buildList {
+                                add("${s.files.size} on camera")
+                                c?.batteryPercent?.let { add("battery $it%${if (c.charging == true) " ⚡" else ""}") }
+                                val free = c?.sdFreeMb ?: c?.internalFreeMb
+                                free?.let { add("${"%.1f".format(it.toDouble() / 1024)} GB free") }
+                            }
+                            Text(parts.joinToString(" · "), style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
                         }
                     }
                 },

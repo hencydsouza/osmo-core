@@ -1122,6 +1122,7 @@ dependencies = [
 name = "osmo-ffi"
 version = "0.1.0"
 dependencies = [
+ "chrono",
  "osmo-core",
  "osmo-sdk",
  "tempfile",
@@ -1133,6 +1134,8 @@ name = "osmo-sdk"
 version = "0.1.0"
 dependencies = [
  "osmo-core",
+ "serde",
+ "serde_json",
  "tempfile",
 ]
 

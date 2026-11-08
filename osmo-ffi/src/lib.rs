@@ -587,3 +587,240 @@ mod tests {
         assert_eq!(sdk_version(), env!("CARGO_PKG_VERSION"));
     }
 }
+
+// ---------------------------------------------------------------------------------------------
+// Camera status, highlights, sidecars
+// ---------------------------------------------------------------------------------------------
+
+/// Battery and storage the camera last reported. Every field is optional: the camera sends them in pieces.
+#[derive(Debug, Clone, Default, PartialEq, Eq, uniffi::Record)]
+pub struct CameraStatus {
+    pub battery_percent: Option<u8>,
+    pub charging: Option<bool>,
+    pub internal_total_mb: Option<u32>,
+    pub internal_free_mb: Option<u32>,
+    pub sd_total_mb: Option<u32>,
+    pub sd_free_mb: Option<u32>,
+}
+
+#[uniffi::export]
+impl Camera {
+    /// The camera's latest battery and storage, once `browse_start` has been called; `None` before that.
+    pub fn status(&self) -> Option<CameraStatus> {
+        let s = self.inner.status()?;
+        Some(CameraStatus {
+            battery_percent: s.battery_percent,
+            charging: s.charging,
+            internal_total_mb: s.internal_total_mb,
+            internal_free_mb: s.internal_free_mb,
+            sd_total_mb: s.sd_total_mb,
+            sd_free_mb: s.sd_free_mb,
+        })
+    }
+
+    /// A video's highlight marks in milliseconds from its start (empty when it has none).
+    pub fn highlights(&self, path: String) -> Result<Vec<u32>, OsmoError> {
+        guarded(|| self.inner.highlights(&path).map_err(OsmoError::from))
+    }
+
+    /// Download a file and its sidecars (the DNG next to a RAW photo, the proxy next to a video). Returns every
+    /// local path written, the main file first.
+    pub fn download_with_sidecars(
+        &self,
+        path: String,
+        dest_dir: String,
+        progress: Option<Arc<dyn ProgressListener>>,
+    ) -> Result<Vec<String>, OsmoError> {
+        guarded(|| {
+            use osmo_sdk::camera::{GetEvent, GetOptions};
+            let opts = GetOptions {
+                sidecars: true,
+                ..GetOptions::default()
+            };
+            let mut written = Vec::new();
+            let mut stopped = false;
+            let report = self.inner.download_many(
+                std::slice::from_ref(&path),
+                Path::new(&dest_dir),
+                opts,
+                &mut |ev| match ev {
+                    GetEvent::Progress { done, size } => {
+                        if let Some(p) = &progress {
+                            if !p.on_progress(done, size.unwrap_or(0)) && !stopped {
+                                stopped = true;
+                                self.inner.cancel();
+                            }
+                        }
+                    }
+                    GetEvent::FileDone { dest, .. } => written.push(dest.display().to_string()),
+                    GetEvent::SidecarSaved(dest) | GetEvent::AlreadyComplete(dest) => {
+                        written.push(dest.display().to_string())
+                    }
+                    _ => {}
+                },
+            )?;
+            if stopped {
+                return Err(OsmoError::Cancelled {
+                    detail: "cancelled".into(),
+                });
+            }
+            if report.failed > 0 || report.not_found > 0 {
+                return Err(OsmoError::NotFound {
+                    detail: format!("{path} could not be downloaded"),
+                });
+            }
+            Ok(written)
+        })
+    }
+}
+
+// ---------------------------------------------------------------------------------------------
+// GPS sync (R-SDK over BLE)
+// ---------------------------------------------------------------------------------------------
+
+/// Who this app is to the camera. Create once with `new_gps_identity`, keep it, and reuse it: the camera
+/// remembers the approval against it.
+#[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
+pub struct GpsIdentity {
+    pub device_id: u32,
+    /// Six bytes.
+    pub mac: Vec<u8>,
+}
+
+/// One phone location reading.
+#[derive(Debug, Clone, PartialEq, uniffi::Record)]
+pub struct GpsPoint {
+    /// Milliseconds since the Unix epoch when the phone took the reading. Readings older than 30 s are skipped.
+    pub observed_unix_ms: u64,
+    pub latitude: f64,
+    pub longitude: f64,
+    pub altitude_m: f64,
+    pub speed_mps: f64,
+    pub bearing_deg: f64,
+    pub horizontal_accuracy_m: f64,
+    pub vertical_accuracy_m: f64,
+    pub speed_accuracy_mps: f64,
+    pub satellites: u32,
+}
+
+/// The app's side of a GPS sync run.
+#[uniffi::export(with_foreign)]
+pub trait GpsSource: Send + Sync {
+    /// The latest reading, or `None` when there is none yet.
+    fn latest(&self) -> Option<GpsPoint>;
+    /// True once the user stopped the sync; the run ends.
+    fn stopped(&self) -> bool;
+    /// Progress notes: "approved", "sent 12 fixes", "camera battery 80%".
+    fn on_event(&self, message: String);
+}
+
+#[uniffi::export]
+pub fn new_gps_identity() -> GpsIdentity {
+    let hex = ble_identity_hex();
+    let device_id = u32::from_str_radix(&hex[..8], 16).unwrap_or(1).max(1);
+    let mac = (0..6)
+        .map(|i| u8::from_str_radix(&hex[8 + i * 2..10 + i * 2], 16).unwrap_or(0))
+        .collect();
+    GpsIdentity { device_id, mac }
+}
+
+fn ble_identity_hex() -> String {
+    osmo_core::duml::commands::new_install_identity().replace('-', "")
+}
+
+/// Send the phone's location to the camera about once a second until `source.stopped()`. Blocks, so run it on
+/// a background thread. `link` must be connected to the camera's `fff4`/`fff5` WITHOUT arming pairing. The
+/// camera may ask the user to approve on its screen the first time (up to 40 s).
+#[uniffi::export]
+pub fn run_gps_sync(
+    link: Arc<dyn BleLink>,
+    identity: GpsIdentity,
+    source: Arc<dyn GpsSource>,
+) -> Result<(), OsmoError> {
+    guarded(|| {
+        use osmo_sdk::gps::GpsInput;
+        let mac: [u8; 6] = identity
+            .mac
+            .as_slice()
+            .try_into()
+            .map_err(|_| OsmoError::Refused {
+                detail: "GPS identity needs a 6-byte mac".into(),
+            })?;
+        let id = osmo_core::rsdk::Identity {
+            device_id: identity.device_id,
+            mac,
+        };
+        let challenge = u16::from_str_radix(&ble_identity_hex()[..4], 16).unwrap_or(0) % 10_000;
+        let mut adapter = LinkAdapter(link);
+        let src = source.clone();
+        let mut session = osmo_core::rsdk::connect(
+            &mut adapter,
+            id,
+            challenge,
+            Duration::from_secs(40),
+            &move || src.stopped(),
+        )
+        .map_err(|e| match e {
+            osmo_core::rsdk::SessionError::Cancelled => OsmoError::Cancelled {
+                detail: e.to_string(),
+            },
+            other => OsmoError::Ble {
+                detail: other.to_string(),
+            },
+        })?;
+        source.on_event("approved".into());
+        let mut sent = 0u32;
+        let mut next_push = std::time::Instant::now();
+        let mut last_battery = None;
+        while !source.stopped() {
+            if std::time::Instant::now() >= next_push {
+                if let Some(p) = source.latest() {
+                    let now = chrono::Local::now();
+                    let ms = u64::try_from(now.timestamp_millis()).unwrap_or(0);
+                    let input = GpsInput {
+                        observed_unix_ms: p.observed_unix_ms,
+                        latitude: p.latitude,
+                        longitude: p.longitude,
+                        altitude_m: p.altitude_m,
+                        speed_mps: p.speed_mps.max(0.0),
+                        bearing_deg: p.bearing_deg.rem_euclid(360.0),
+                        horizontal_accuracy_m: p.horizontal_accuracy_m.max(0.0),
+                        vertical_accuracy_m: p.vertical_accuracy_m.max(0.0),
+                        speed_accuracy_mps: p.speed_accuracy_mps.max(0.0),
+                        satellites: p.satellites,
+                    };
+                    if input.is_fresh(ms) {
+                        use chrono::{Datelike, Timelike};
+                        let date =
+                            now.year().max(1) as u32 * 10_000 + now.month() * 100 + now.day();
+                        let time = now.hour() * 10_000 + now.minute() * 100 + now.second();
+                        let fix = input
+                            .to_fix(date, time)
+                            .map_err(|e| OsmoError::Refused { detail: e })?;
+                        session.send_fix(&fix).map_err(|e| OsmoError::Ble {
+                            detail: e.to_string(),
+                        })?;
+                        sent += 1;
+                        source.on_event(format!("sent {sent} fixes"));
+                    }
+                }
+                next_push = std::time::Instant::now() + Duration::from_secs(1);
+            }
+            match session.poll(Duration::from_millis(100)) {
+                Ok(Some(st)) if st.battery_percent != last_battery => {
+                    last_battery = st.battery_percent;
+                    if let Some(b) = st.battery_percent {
+                        source.on_event(format!("camera battery {b}%"));
+                    }
+                }
+                Ok(_) => {}
+                Err(e) => {
+                    return Err(OsmoError::Ble {
+                        detail: e.to_string(),
+                    })
+                }
+            }
+        }
+        Ok(())
+    })
+}

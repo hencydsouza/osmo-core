@@ -206,19 +206,28 @@ pub struct Camera {
 struct Held {
     stop: Arc<AtomicBool>,
     handle: std::thread::JoinHandle<Session>,
+    /// Latest status the camera pushed (battery, storage), refreshed every keepalive tick.
+    status: Arc<Mutex<osmo_core::status::Status>>,
 }
 
 impl Held {
     fn start(mut s: Session) -> Held {
         let stop = Arc::new(AtomicBool::new(false));
         let flag = stop.clone();
+        let status = Arc::new(Mutex::new(s.status().clone()));
+        let shared = status.clone();
         let handle = std::thread::spawn(move || {
             while !flag.load(Ordering::Relaxed) {
                 s.keepalive_tick();
+                *shared.lock().unwrap_or_else(|e| e.into_inner()) = s.status().clone();
             }
             s
         });
-        Held { stop, handle }
+        Held {
+            stop,
+            handle,
+            status,
+        }
     }
 
     fn release(self) {
@@ -426,6 +435,24 @@ impl Camera {
         Ok(())
     }
 
+    /// The camera's latest pushed status (battery, storage), from the browse session; `None` when no browse
+    /// session is open yet.
+    pub fn status(&self) -> Option<osmo_core::status::Status> {
+        let g = self.browse.lock().unwrap_or_else(|e| e.into_inner());
+        g.as_ref()
+            .map(|h| h.status.lock().unwrap_or_else(|e| e.into_inner()).clone())
+    }
+
+    /// A video's highlight marks, in milliseconds from the start. Empty when it has none.
+    pub fn highlights(&self, path: &str) -> Result<Vec<u32>, SdkError> {
+        self.start();
+        let path = validate_get_path(path).map_err(SdkError::NotFound)?;
+        let mut s = self.session()?;
+        let file = self.lookup(&mut s, path)?;
+        s.highlights(&file)
+            .map_err(|e| SdkError::Session(e.to_string()))
+    }
+
     /// End the browse session, if any.
     pub fn browse_end(&self) {
         let held = self.browse.lock().unwrap_or_else(|e| e.into_inner()).take();
@@ -452,7 +479,9 @@ impl Camera {
                 return Ok(b);
             }
         }
-        Err(SdkError::NotFound(format!("no thumbnail available for {path}")))
+        Err(SdkError::NotFound(format!(
+            "no thumbnail available for {path}"
+        )))
     }
 
     pub fn thumbnail(&self, path: &str) -> Result<Vec<u8>, SdkError> {

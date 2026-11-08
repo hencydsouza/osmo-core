@@ -100,6 +100,12 @@ class CameraRepository(private val app: Application) {
         }
     }
 
+    /** The saved camera's BLE device, for GPS sync. */
+    fun savedDevice(): android.bluetooth.BluetoothDevice? = store.load()?.let { s ->
+        (app.getSystemService(android.content.Context.BLUETOOTH_SERVICE) as android.bluetooth.BluetoothManager)
+            .adapter?.getRemoteDevice(s.address)
+    }
+
     fun disconnect() {
         disconnectInternal()
         _link.value = Link.Idle
@@ -147,6 +153,24 @@ class CameraRepository(private val app: Application) {
         "http://$CAMERA_IP/v2?storage=${file.storage}&path=$path"
     }
 
+    /** Battery and storage the camera last reported; opens the browse session if needed. */
+    suspend fun status(): uniffi.osmo_ffi.CameraStatus? = withContext(Dispatchers.IO) {
+        rw.read { cam().let { it.browseStart(); it.status() } }
+    }
+
+    /** A video's highlight marks in milliseconds. */
+    suspend fun highlights(path: String): List<UInt> = op { it.highlights(path) }
+
+    private val settings = app.getSharedPreferences("settings", android.content.Context.MODE_PRIVATE)
+    private val _sidecars = MutableStateFlow(settings.getBoolean("sidecars", false))
+    /** Also fetch the DNG next to a RAW photo and the proxy next to a video. */
+    val sidecars: StateFlow<Boolean> = _sidecars.asStateFlow()
+    fun setSidecars(on: Boolean) { settings.edit().putBoolean("sidecars", on).apply(); _sidecars.value = on }
+
+    private fun fetch(c: Camera, f: MediaFile, p: ProgressListener): File =
+        if (_sidecars.value) File(c.downloadWithSidecars(f.path, mediaDir.path, p).first())
+        else File(c.download(f.path, mediaDir.path, p))
+
     suspend fun setFavourite(path: String, on: Boolean) = op { it.setFavourite(path, on) }
 
     suspend fun planDelete(paths: List<String>): List<MediaFile> = op { it.planDelete(paths) }
@@ -154,7 +178,7 @@ class CameraRepository(private val app: Application) {
 
     /** Downloads into app storage (resumes partial files), then copies into the gallery. Returns the local file. */
     suspend fun download(file: MediaFile, onProgress: (Long, Long) -> Unit): File = op { c ->
-        val saved = File(c.download(file.path, mediaDir.path, progress(onProgress)))
+        val saved = fetch(c, file, progress(onProgress))
         publish(saved, file.kind)
         saved
     }
@@ -194,7 +218,7 @@ class CameraRepository(private val app: Application) {
     /** Downloads several files in order. [onProgress] gets (index, count, bytes done, bytes total) for the current file. */
     suspend fun downloadMany(files: List<MediaFile>, onProgress: (Int, Int, Long, Long) -> Unit): List<File> = op { c ->
         files.mapIndexed { i, f ->
-            val saved = File(c.download(f.path, mediaDir.path, progress { d, t -> onProgress(i, files.size, d, t) }))
+            val saved = fetch(c, f, progress { d, t -> onProgress(i, files.size, d, t) })
             publish(saved, f.kind)
             saved
         }
