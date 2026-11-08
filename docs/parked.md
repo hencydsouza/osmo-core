@@ -32,5 +32,9 @@ Evidence lives in `docs/hardware-log.md`; the decision trail in `.superpowers/sd
 
 - `rm` now searches older listing pages (fixed 2026-11-08), but a delete that needs more than about 40 s of walking is refused, not sent. The multi-page walk is tested with simulated pages only: the card has 14 files, so everything fits on one page.
 - The final review of the GPS wire code, camera-memory code and Bluetooth session was done 2026-11-08; see `docs/hardware-log.md`.
-- `trim` and `frame` need `ffmpeg` installed.
+- `frame` needs `ffmpeg` installed (`trim` is pure Rust). `get`, `thumb` and `ls` still run their own orchestration in the CLI rather than through `osmo_sdk::Camera`: they use the `--storage`/`--proxy`/`--no-keepalive`/`--dump` options `Camera` does not offer yet.
 - The Wi-Fi helper only works on macOS.
+
+## SDK
+
+Shipped in v0.4.0: osmo-sdk and osmo-ffi (see docs/sdk.md). Still parked: Windows verification beyond CI, x86_64 macOS build locally, moving ls/get/thumb in the CLI onto Camera.

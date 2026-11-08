@@ -5,3 +5,13 @@
 *.log
 .env
 .scratch-probe/
+dist/
+sdk-tests/swift/Sources/
+sdk-tests/swift/.build/
+sdk-tests/android/.gradle/
+sdk-tests/android/build/
+sdk-tests/android/app/build/
+sdk-tests/android/.gradle/
+sdk-tests/android/build/
+sdk-tests/android/sdk/build/
+sdk-tests/android/local.properties

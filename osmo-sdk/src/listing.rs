@@ -238,6 +238,14 @@ pub enum Kind {
     Videos,
 }
 
+/// What `Camera::list` shows: photos or videos, favourites only, and the camera-side highlights filter.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct LsFilter {
+    pub kind: Kind,
+    pub starred: bool,
+    pub highlights: bool,
+}
+
 /// Osmosis's gallery chips: photos or videos, and favourites only.
 pub fn filter_files(files: &[CameraFile], kind: Kind, starred_only: bool) -> Vec<CameraFile> {
     files

@@ -14,6 +14,15 @@ pub trait Datagram {
     fn recv(&mut self, timeout: Duration) -> io::Result<Option<Vec<u8>>>;
 }
 
+impl Datagram for Box<dyn Datagram + Send> {
+    fn send(&mut self, pkt: &[u8]) -> io::Result<()> {
+        (**self).send(pkt)
+    }
+    fn recv(&mut self, timeout: Duration) -> io::Result<Option<Vec<u8>>> {
+        (**self).recv(timeout)
+    }
+}
+
 pub struct UdpPeer {
     sock: UdpSocket,
     peer: SocketAddr,
