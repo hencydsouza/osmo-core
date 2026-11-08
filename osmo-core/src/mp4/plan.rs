@@ -69,6 +69,7 @@ pub fn plan_trim(movie: &Movie, from_secs: f64, to_secs: f64) -> Result<TrimPlan
     // End: the first sample at or after `to` (ceil), clamped to the clip's real end.
     let to_ticks = (to_secs * scale).ceil() as u64;
     let end = video.samples.partition_point(|s| s.dts < to_ticks).max(start + 1);
+    let end_clamped = end == video.samples.len();
     let end_dts = video.samples.get(end).map_or(video.duration, |s| s.dts);
 
     let actual_start_secs = start_dts as f64 / scale;
@@ -82,11 +83,15 @@ pub fn plan_trim(movie: &Movie, from_secs: f64, to_secs: f64) -> Result<TrimPlan
             1 => cuts.push(TrackCut { track: i, first: 0, end: 1 }),
             _ => {
                 let ts = f64::from(t.timescale.max(1));
-                let (first, end) = span(
+                let (first, mut end) = span(
                     t,
                     (actual_start_secs * ts).round() as u64,
                     (end_secs * ts).round() as u64,
                 );
+                // At the clip's end keep every remaining sample: audio often outlasts the video.
+                if end_clamped {
+                    end = t.samples.len();
+                }
                 cuts.push(TrackCut { track: i, first, end });
             }
         }
@@ -173,6 +178,14 @@ mod tests {
                 TrackCut { track: 2, first: 3, end: 6 },
             ]
         );
+    }
+
+    #[test]
+    fn audio_outlasting_the_video_is_kept_to_the_end_when_the_cut_reaches_it() {
+        let audio_samples: Vec<(u64, u32, bool)> = (0..15).map(|i| (i, 1, true)).collect();
+        let audio = track(b"soun", 20, 15, &audio_samples);
+        let plan = plan_trim(&movie(vec![video(), audio]), 0.0, 5.0).unwrap();
+        assert_eq!(plan.cuts[1], TrackCut { track: 1, first: 0, end: 15 });
     }
 
     #[test]

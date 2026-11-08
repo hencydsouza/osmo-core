@@ -240,3 +240,9 @@ multi-attempt download *with* keepalive (no cuts happened in either keepalive ru
 - Camera memory (`cameras.rs`): atomic per-camera files, filename checked against the id, damaged data reported not discarded. Fixed: the error now names the damaged file.
 - Bluetooth (`ble_btleplug.rs`): scan and connect retries are bounded (3 x 6 s scan, 3 x 15 s connect). Fixed: disconnect had no time limit and could hang a command on exit; it now gives up after 5 s. A first version of that fix panicked ("no reactor running") because the timeout was built outside the runtime; the live `wifi` run caught it and it is fixed (unit tests cannot cover it).
 - Live after the fixes: `cameras --scan` finds the Action 4; `wifi` returns credentials and exits in about 9 s.
+
+## 2026-11-08: pure-Rust trim vs the real DJI proxy (fixture-level, not camera-live)
+
+`DJI_20261101084646_0008_D.LRF` (Action 4 proxy, 4 trak: vide 94, soun 177, djmd 94, tmcd 1 samples; keyframes every 1.2 s).
+Cut 0.94..2.82 s: 71 video packets, matching `ffmpeg -ss 0.94 -t 1.88 -c copy` (71). Every output sample is byte-identical to its source sample, ffprobe stream/packet counts match the plan, and ffmpeg decodes with no errors.
+Found: a lone-sample `tmcd` track must have its duration shrunk to the cut, or the container reports the original length (3.76 s instead of 2.84 s).

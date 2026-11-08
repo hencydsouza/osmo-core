@@ -4,6 +4,9 @@ use thiserror::Error;
 
 pub mod boxes;
 pub mod plan;
+mod write;
+pub use plan::{plan_trim, TrackCut, TrimPlan};
+pub use write::{trim, TrimOutcome};
 pub mod tables;
 
 use boxes::{find, walk_mem, walk_top_level, MemBox};
