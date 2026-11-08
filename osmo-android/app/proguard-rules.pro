@@ -1,0 +1,3 @@
+-keep class uniffi.** { *; }
+-keep class com.sun.jna.** { *; }
+-dontwarn java.awt.**
