@@ -14,7 +14,7 @@ private func tmp(_ name: String) -> String {
 
 private final class MockLink: BleLink {
     var written: [Data] = []
-    func writeCommand(bytes: Data) throws { written.append(bytes); throw OsmoError.Ble(message: "device disconnected") }
+    func writeCommand(bytes: Data) throws { written.append(bytes); throw OsmoError.Ble(detail: "device disconnected") }
     func recv(timeoutMs: UInt32) throws -> Data? { nil }
 }
 

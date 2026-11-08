@@ -12,27 +12,27 @@ uniffi::setup_scaffolding!();
 
 #[derive(Debug, uniffi::Error)]
 pub enum OsmoError {
-    Session { message: String },
-    NotFound { message: String },
-    Refused { message: String },
-    Io { message: String },
-    Mp4 { message: String },
-    Cancelled { message: String },
-    Ble { message: String },
-    Internal { message: String },
+    Session { detail: String },
+    NotFound { detail: String },
+    Refused { detail: String },
+    Io { detail: String },
+    Mp4 { detail: String },
+    Cancelled { detail: String },
+    Ble { detail: String },
+    Internal { detail: String },
 }
 
 impl std::fmt::Display for OsmoError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let (k, m) = match self {
-            OsmoError::Session { message } => ("session", message),
-            OsmoError::NotFound { message } => ("not found", message),
-            OsmoError::Refused { message } => ("refused", message),
-            OsmoError::Io { message } => ("io", message),
-            OsmoError::Mp4 { message } => ("mp4", message),
-            OsmoError::Cancelled { message } => ("cancelled", message),
-            OsmoError::Ble { message } => ("ble", message),
-            OsmoError::Internal { message } => ("internal", message),
+            OsmoError::Session { detail: message } => ("session", message),
+            OsmoError::NotFound { detail: message } => ("not found", message),
+            OsmoError::Refused { detail: message } => ("refused", message),
+            OsmoError::Io { detail: message } => ("io", message),
+            OsmoError::Mp4 { detail: message } => ("mp4", message),
+            OsmoError::Cancelled { detail: message } => ("cancelled", message),
+            OsmoError::Ble { detail: message } => ("ble", message),
+            OsmoError::Internal { detail: message } => ("internal", message),
         };
         write!(f, "{k}: {m}")
     }
@@ -44,12 +44,12 @@ impl From<SdkError> for OsmoError {
     fn from(e: SdkError) -> Self {
         let message = e.to_string();
         match e {
-            SdkError::Session(_) => OsmoError::Session { message },
-            SdkError::NotFound(_) => OsmoError::NotFound { message },
-            SdkError::Refused(_) => OsmoError::Refused { message },
-            SdkError::Io(_) => OsmoError::Io { message },
-            SdkError::Mp4(_) => OsmoError::Mp4 { message },
-            SdkError::Cancelled => OsmoError::Cancelled { message },
+            SdkError::Session(_) => OsmoError::Session { detail: message },
+            SdkError::NotFound(_) => OsmoError::NotFound { detail: message },
+            SdkError::Refused(_) => OsmoError::Refused { detail: message },
+            SdkError::Io(_) => OsmoError::Io { detail: message },
+            SdkError::Mp4(_) => OsmoError::Mp4 { detail: message },
+            SdkError::Cancelled => OsmoError::Cancelled { detail: message },
         }
     }
 }
@@ -65,7 +65,7 @@ fn guarded<T>(f: impl FnOnce() -> Result<T, OsmoError>) -> Result<T, OsmoError> 
                 .or_else(|| p.downcast_ref::<String>().cloned())
                 .unwrap_or_else(|| "unknown panic".to_string());
             Err(OsmoError::Internal {
-                message: format!("internal error: {message}"),
+                detail: format!("internal error: {message}"),
             })
         }
     }
@@ -124,7 +124,9 @@ struct LinkAdapter(Arc<dyn BleLink>);
 
 fn link_err(e: OsmoError) -> LinkError {
     match e {
-        OsmoError::Ble { message } if message.contains("disconnected") => LinkError::Disconnected,
+        OsmoError::Ble { detail: message } if message.contains("disconnected") => {
+            LinkError::Disconnected
+        }
         other => LinkError::Other(other.to_string()),
     }
 }
@@ -151,10 +153,10 @@ pub fn read_wifi_credentials(link: Arc<dyn BleLink>) -> Result<WifiCredentials, 
         )
         .map_err(|e| match e {
             PairError::Cancelled => OsmoError::Cancelled {
-                message: e.to_string(),
+                detail: e.to_string(),
             },
             other => OsmoError::Ble {
-                message: other.to_string(),
+                detail: other.to_string(),
             },
         })?;
         Ok(WifiCredentials {
@@ -179,7 +181,7 @@ pub fn trim_local_file(
         check_secs("to", to_secs)?;
         let mut src =
             osmo_core::mp4::FileSource::open(Path::new(&src_path)).map_err(|e| OsmoError::Io {
-                message: e.to_string(),
+                detail: e.to_string(),
             })?;
         let stop = std::sync::atomic::AtomicBool::new(false);
         let mut p = |done, total| {
@@ -230,7 +232,7 @@ fn check_secs(name: &str, v: f64) -> Result<(), OsmoError> {
         Ok(())
     } else {
         Err(OsmoError::Refused {
-            message: format!("{name} must be a finite number of seconds, 0 or more (got {v})"),
+            detail: format!("{name} must be a finite number of seconds, 0 or more (got {v})"),
         })
     }
 }
@@ -238,7 +240,7 @@ fn check_secs(name: &str, v: f64) -> Result<(), OsmoError> {
 fn dest(p: &str) -> Result<&Path, OsmoError> {
     if p.is_empty() {
         return Err(OsmoError::Io {
-            message: "empty destination path".to_string(),
+            detail: "empty destination path".to_string(),
         });
     }
     Ok(Path::new(p))
@@ -380,12 +382,12 @@ mod tests {
     fn panic_inside_a_call_becomes_osmo_error_internal() {
         let r: Result<(), _> = guarded(|| panic!("boom"));
         assert!(
-            matches!(&r, Err(OsmoError::Internal { message }) if message.contains("boom")),
+            matches!(&r, Err(OsmoError::Internal { detail: message }) if message.contains("boom")),
             "{r:?}"
         );
         let r: Result<(), _> = guarded(|| panic!("{}", String::from("formatted")));
         assert!(
-            matches!(&r, Err(OsmoError::Internal { message }) if message.contains("formatted"))
+            matches!(&r, Err(OsmoError::Internal { detail: message }) if message.contains("formatted"))
         );
     }
 
@@ -468,7 +470,7 @@ mod tests {
         fn write_command(&self, bytes: Vec<u8>) -> Result<(), OsmoError> {
             if self.fail_write {
                 return Err(OsmoError::Ble {
-                    message: "device disconnected".into(),
+                    detail: "device disconnected".into(),
                 });
             }
             self.written.lock().unwrap().push(bytes);
@@ -496,7 +498,7 @@ mod tests {
         );
         assert_eq!(a.recv(Duration::from_millis(5)).unwrap(), None);
         *f.reply.lock().unwrap() = Some(Err(OsmoError::Ble {
-            message: "gatt 133".into(),
+            detail: "gatt 133".into(),
         }));
         assert!(
             matches!(a.recv(Duration::ZERO), Err(LinkError::Other(m)) if m.contains("gatt 133"))
