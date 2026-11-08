@@ -227,3 +227,7 @@ multi-attempt download *with* keepalive (no cuts happened in either keepalive ru
 
 - `with-wifi -- trim <2 GiB clip> --from 0:05 --to 0:15`: saved a 10.2 s, 3840x2880 HEVC + AAC clip (138 MB) in about 5 s, fetching only the needed ranges. Cut on a 4 s clip (range past its end) produced a 0.19 s file with no ffmpeg error, which led to the short-clip warning.
 - `with-wifi -- frame <same clip> --at 0:08`: saved a 3840x2880 JPEG (708 KB), checked visually. Internet back after both. Test files deleted.
+
+## Un-favourite variant search (2026-11-08): negative
+- Sent six payload variants on 0009 (last five bytes: 00 02 00 00 00 / 00 ff 00 00 00 / 01 00 00 00 00 / 00 00 01 00 00 / 00 00 00 01 00 / 02 00 00 00 00). The camera acknowledged every one and kept the star. It acks any content, so blind variants cannot find the right frame. Probe code removed. Needs a Mimo capture on an Action 4.
+- Time sync: our registration, subscriptions, receiver (type 0x08 id 1) and payload match Osmosis's sender line for line; the Action 4 still answers 0xe0 (same code it gives the 0x02/0x0C playback entry). Likely a different command on this model. Needs a Mimo capture too.
