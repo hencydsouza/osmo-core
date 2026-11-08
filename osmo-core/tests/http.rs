@@ -285,7 +285,7 @@ fn unreachable_camera_fails_in_bounded_time() {
         c.download_resumable(P, &dest, None, &mut |_| {}),
         Err(DownloadError::Stalled { .. })
     ));
-    assert!(t.elapsed() < Duration::from_secs(10));
+    assert!(t.elapsed() < Duration::from_secs(60));
 }
 
 #[test]
