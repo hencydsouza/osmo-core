@@ -53,7 +53,7 @@ reports an error when the reply is incomplete or reaches the 120-frame request l
 not exposed for deletion or favourite operations. To download an individual expanded frame, use its printed
 path with `osmo get --storage 0 <path>` for SD (or `--storage 1` for internal storage).
 
-`rm` deletes only exact paths from the newest listing, all or nothing: a typo, glob, or a file without a verified
+`rm` deletes only exact paths, searching older listing pages until each is found, all or nothing: a typo, glob, or a file without a verified
 handle refuses the whole command and nothing is sent. It confirms on a fresh session that the files are gone
 and reports an error if the camera said OK but they are still listed.
 
