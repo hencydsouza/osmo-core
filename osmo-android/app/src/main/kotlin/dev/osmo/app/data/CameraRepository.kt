@@ -22,6 +22,7 @@ import uniffi.osmo_ffi.OsmoException
 import uniffi.osmo_ffi.ProgressListener
 import uniffi.osmo_ffi.TrimResult
 import uniffi.osmo_ffi.readWifiCredentials
+import uniffi.osmo_ffi.trimLocalFile
 
 sealed interface Link {
     data object Idle : Link
@@ -162,6 +163,42 @@ class CameraRepository(private val app: Application) {
         publish(out, MediaKind.PHOTO)
         out
     }
+
+    /** Stars or un-stars several files on the camera, one after another. Returns how many succeeded. */
+    suspend fun setFavouriteMany(paths: List<String>, on: Boolean): Int = op { c ->
+        paths.count { p -> runCatching { c.setFavourite(p, on) }.isSuccess }
+    }
+
+    /** Downloads several files in order. [onProgress] gets (index, count, bytes done, bytes total) for the current file. */
+    suspend fun downloadMany(files: List<MediaFile>, onProgress: (Int, Int, Long, Long) -> Unit): List<File> = op { c ->
+        files.mapIndexed { i, f ->
+            val saved = File(c.download(f.path, mediaDir.path, progress { d, t -> onProgress(i, files.size, d, t) }))
+            publish(saved, f.kind)
+            saved
+        }
+    }
+
+    // --- Local files: work without a camera connection -------------------------------------
+
+    /** Everything this app has saved, newest first. */
+    suspend fun localFiles(): List<File> = withContext(Dispatchers.IO) {
+        mediaDir.listFiles { f -> f.isFile && !f.name.endsWith(".part") }?.sortedByDescending { it.lastModified() } ?: emptyList()
+    }
+
+    suspend fun deleteLocal(file: File) = withContext(Dispatchers.IO) { file.delete() }
+
+    /** Trims a file already on the phone (no camera needed). */
+    suspend fun trimLocal(src: File, fromSecs: Double, toSecs: Double, onProgress: (Long, Long) -> Unit): Pair<File, TrimResult> =
+        withContext(Dispatchers.IO) {
+            val out = File(mediaDir, "${src.nameWithoutExtension}_${fromSecs.toInt()}-${toSecs.toInt()}s.mp4")
+            val r = trimLocalFile(src.path, fromSecs, toSecs, out.path, progress(onProgress))
+            publish(out, MediaKind.VIDEO)
+            out to r
+        }
+
+    /** A content:// URI other apps can read, for open/share intents. */
+    fun uriFor(file: File): android.net.Uri =
+        androidx.core.content.FileProvider.getUriForFile(app, "${app.packageName}.files", file)
 
     private fun progress(on: (Long, Long) -> Unit) = object : ProgressListener {
         override fun onProgress(done: ULong, total: ULong): Boolean {

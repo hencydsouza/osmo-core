@@ -14,6 +14,7 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.Download
 import androidx.compose.material.icons.filled.Star
+import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.StarBorder
 import androidx.compose.material3.Button
 import androidx.compose.material3.ExperimentalMaterial3Api
@@ -60,6 +61,8 @@ data class DetailState(
     val done: Long = 0,
     val total: Long = 0,
     val message: String? = null,
+    val deletePlan: List<MediaFile>? = null,
+    val deleted: Boolean = false,
 )
 
 class DetailViewModel(private val repo: CameraRepository, val file: MediaFile) : ViewModel() {
@@ -98,6 +101,24 @@ class DetailViewModel(private val repo: CameraRepository, val file: MediaFile) :
         "Saved ${f.name}: ${"%.1f".format(r.durationSecs)}s from ${"%.1f".format(r.actualStartSecs)}s"
     }
 
+    fun planDelete() = run("Checking delete") {
+        val plan = repo.planDelete(listOf(file.path))
+        _s.update { it.copy(deletePlan = plan) }
+        if (plan.isEmpty()) "Nothing to delete" else ""
+    }
+
+    fun cancelDelete() = _s.update { it.copy(deletePlan = null) }
+
+    fun confirmDelete() {
+        val paths = _s.value.deletePlan?.map { it.path } ?: return
+        _s.update { it.copy(deletePlan = null) }
+        run("Deleting") {
+            repo.delete(paths)
+            _s.update { it.copy(deleted = true) }
+            "Deleted"
+        }
+    }
+
     fun frame(at: Double) = run("Extracting frame") {
         "Saved ${repo.frame(file, at).name}"
     }
@@ -108,7 +129,8 @@ class DetailViewModel(private val repo: CameraRepository, val file: MediaFile) :
 fun DetailScreen(vm: DetailViewModel, onBack: () -> Unit) {
     val s by vm.state.collectAsStateWithLifecycle()
     val snack = remember { SnackbarHostState() }
-    LaunchedEffect(s.message) { s.message?.let { snack.showSnackbar(it) } }
+    LaunchedEffect(s.message) { s.message?.takeIf { it.isNotEmpty() }?.let { snack.showSnackbar(it) } }
+    LaunchedEffect(s.deleted) { if (s.deleted) onBack() }
     val thumb by produceState<androidx.compose.ui.graphics.ImageBitmap?>(null) {
         value = vm.thumbnail()?.let { b -> BitmapFactory.decodeByteArray(b, 0, b.size)?.asImageBitmap() }
     }
@@ -118,6 +140,8 @@ fun DetailScreen(vm: DetailViewModel, onBack: () -> Unit) {
     val video = vm.file.kind == MediaKind.VIDEO
     val idle = s.busy == null
 
+    s.deletePlan?.takeIf { it.isNotEmpty() }?.let { DeleteDialog(it, vm::confirmDelete, vm::cancelDelete) }
+
     Scaffold(
         snackbarHost = { SnackbarHost(snack) },
         topBar = {
@@ -125,6 +149,7 @@ fun DetailScreen(vm: DetailViewModel, onBack: () -> Unit) {
                 title = { Text(vm.file.path.substringAfterLast('/')) },
                 navigationIcon = { IconButton(onClick = onBack) { Icon(Icons.AutoMirrored.Filled.ArrowBack, "Back") } },
                 actions = {
+                    IconButton(onClick = vm::planDelete, enabled = idle) { Icon(Icons.Filled.Delete, "Delete from camera") }
                     IconButton(onClick = vm::toggleStar, enabled = idle) {
                         Icon(if (s.starred) Icons.Filled.Star else Icons.Filled.StarBorder, if (s.starred) "Remove favourite" else "Favourite")
                     }
@@ -179,5 +204,16 @@ private fun SecondsField(label: String, value: String, onChange: (String) -> Uni
     OutlinedTextField(
         value, onChange, modifier, label = { Text(label) }, singleLine = true,
         keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal),
+    )
+}
+
+@Composable
+private fun DeleteDialog(plan: List<MediaFile>, onConfirm: () -> Unit, onDismiss: () -> Unit) {
+    androidx.compose.material3.AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("Delete ${plan.size} file${if (plan.size == 1) "" else "s"} from the camera?") },
+        text = { Text("This cannot be undone. Download anything you want to keep first.\n\n" + plan.joinToString("\n") { it.path.substringAfterLast('/') }) },
+        confirmButton = { TextButton(onClick = onConfirm) { Text("Delete", color = MaterialTheme.colorScheme.error) } },
+        dismissButton = { TextButton(onClick = onDismiss) { Text("Keep") } },
     )
 }

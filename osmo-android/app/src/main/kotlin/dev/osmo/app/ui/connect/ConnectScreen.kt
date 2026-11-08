@@ -24,6 +24,7 @@ import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
+import androidx.compose.material.icons.filled.PhoneAndroid
 import androidx.compose.material3.LargeTopAppBar
 import androidx.compose.material3.ListItem
 import androidx.compose.material3.MaterialTheme
@@ -99,7 +100,7 @@ private fun blePermissions(): Array<String> =
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-fun ConnectScreen(vm: ConnectViewModel, sdkVersion: String, onConnected: () -> Unit) {
+fun ConnectScreen(vm: ConnectViewModel, sdkVersion: String, onLocal: () -> Unit, onConnected: () -> Unit) {
     val link by vm.link.collectAsStateWithLifecycle()
     val saved by vm.saved.collectAsStateWithLifecycle()
     val found by vm.found.collectAsStateWithLifecycle()
@@ -119,7 +120,13 @@ fun ConnectScreen(vm: ConnectViewModel, sdkVersion: String, onConnected: () -> U
     val scroll = TopAppBarDefaults.exitUntilCollapsedScrollBehavior()
     Scaffold(
         modifier = Modifier.nestedScroll(scroll.nestedScrollConnection),
-        topBar = { LargeTopAppBar(title = { Text("Osmo") }, scrollBehavior = scroll) },
+        topBar = {
+            LargeTopAppBar(
+                title = { Text("Osmo") },
+                actions = { androidx.compose.material3.IconButton(onClick = onLocal) { androidx.compose.material3.Icon(androidx.compose.material.icons.Icons.Filled.PhoneAndroid, "On this phone") } },
+                scrollBehavior = scroll,
+            )
+        },
     ) { pad ->
         LazyColumn(
             Modifier.fillMaxSize().padding(pad),

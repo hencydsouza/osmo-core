@@ -22,6 +22,9 @@ import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.PlayCircle
 import androidx.compose.material.icons.filled.Refresh
+import androidx.compose.material.icons.filled.PhoneAndroid
+import androidx.compose.material.icons.filled.Download
+import androidx.compose.material.icons.filled.StarBorder
 import androidx.compose.material.icons.filled.Star
 import androidx.compose.material.icons.filled.CheckCircle
 import androidx.compose.material3.AlertDialog
@@ -68,7 +71,12 @@ data class LibraryState(
     /** Files a pending delete would remove (from the SDK's plan; nothing is sent until confirmed). */
     val deletePlan: List<MediaFile>? = null,
     val message: String? = null,
+    /** Bulk operation in flight: label, and (file index, file count, bytes done, bytes total) for downloads. */
+    val busy: String? = null,
+    val bulk: BulkProgress? = null,
 )
+
+data class BulkProgress(val index: Int, val count: Int, val done: Long, val total: Long)
 
 class LibraryViewModel(private val repo: CameraRepository) : ViewModel() {
     private val _s = MutableStateFlow(LibraryState())
@@ -102,6 +110,31 @@ class LibraryViewModel(private val repo: CameraRepository) : ViewModel() {
 
     fun cancelDelete() = _s.update { it.copy(deletePlan = null) }
 
+    fun cancelBulk() = repo.cancel()
+
+    fun starSelected(on: Boolean) {
+        val paths = _s.value.selected.toList()
+        if (_s.value.busy != null) return
+        _s.update { it.copy(busy = if (on) "Starring" else "Un-starring") }
+        viewModelScope.launch {
+            runCatching { repo.setFavouriteMany(paths, on) }
+                .onSuccess { n -> _s.update { it.copy(busy = null, selected = emptySet(), message = "${if (on) "Starred" else "Un-starred"} $n of ${paths.size}") }; refresh() }
+                .onFailure { e -> _s.update { it.copy(busy = null, message = e.friendly()) } }
+        }
+    }
+
+    fun downloadSelected() {
+        val s = _s.value
+        if (s.busy != null) return
+        val files = s.files.filter { it.path in s.selected }
+        _s.update { it.copy(busy = "Downloading", bulk = BulkProgress(0, files.size, 0, 0)) }
+        viewModelScope.launch {
+            runCatching { repo.downloadMany(files) { i, n, d, t -> _s.update { it.copy(bulk = BulkProgress(i, n, d, t)) } } }
+                .onSuccess { r -> _s.update { it.copy(busy = null, bulk = null, selected = emptySet(), message = "Saved ${r.size} file${if (r.size == 1) "" else "s"} to Movies/Pictures › Osmo") } }
+                .onFailure { e -> _s.update { it.copy(busy = null, bulk = null, message = e.friendly()) } }
+        }
+    }
+
     fun confirmDelete() {
         val paths = _s.value.deletePlan?.map { it.path } ?: return
         _s.update { it.copy(deletePlan = null, loading = true) }
@@ -115,7 +148,7 @@ class LibraryViewModel(private val repo: CameraRepository) : ViewModel() {
 
 @OptIn(ExperimentalMaterial3Api::class, ExperimentalFoundationApi::class)
 @Composable
-fun LibraryScreen(vm: LibraryViewModel, onOpen: (MediaFile) -> Unit, onBack: () -> Unit) {
+fun LibraryScreen(vm: LibraryViewModel, onOpen: (MediaFile) -> Unit, onLocal: () -> Unit, onBack: () -> Unit) {
     val s by vm.state.collectAsStateWithLifecycle()
     val snack = remember { SnackbarHostState() }
     LaunchedEffect(Unit) { if (vm.state.value.files.isEmpty()) vm.refresh() }
@@ -128,18 +161,36 @@ fun LibraryScreen(vm: LibraryViewModel, onOpen: (MediaFile) -> Unit, onBack: () 
                 TopAppBar(
                     title = { Text("Library") },
                     navigationIcon = { IconButton(onClick = onBack) { Icon(Icons.AutoMirrored.Filled.ArrowBack, "Back") } },
-                    actions = { IconButton(onClick = vm::refresh) { Icon(Icons.Filled.Refresh, "Refresh") } },
+                    actions = {
+                        IconButton(onClick = onLocal) { Icon(Icons.Filled.PhoneAndroid, "On this phone") }
+                        IconButton(onClick = vm::refresh) { Icon(Icons.Filled.Refresh, "Refresh") }
+                    },
                 )
             } else {
                 TopAppBar(
                     title = { Text("${s.selected.size} selected") },
                     navigationIcon = { IconButton(onClick = vm::clearSelection) { Icon(Icons.Filled.Close, "Clear selection") } },
-                    actions = { IconButton(onClick = vm::planDelete) { Icon(Icons.Filled.Delete, "Delete") } },
+                    actions = {
+                        val idle = s.busy == null
+                        IconButton(onClick = vm::downloadSelected, enabled = idle) { Icon(Icons.Filled.Download, "Download selected") }
+                        IconButton(onClick = { vm.starSelected(true) }, enabled = idle) { Icon(Icons.Filled.Star, "Star selected") }
+                        IconButton(onClick = { vm.starSelected(false) }, enabled = idle) { Icon(Icons.Filled.StarBorder, "Un-star selected") }
+                        IconButton(onClick = vm::planDelete, enabled = idle) { Icon(Icons.Filled.Delete, "Delete selected") }
+                    },
                 )
             }
         },
     ) { pad ->
         Column(Modifier.padding(pad).fillMaxSize()) {
+            s.busy?.let { label ->
+                Column(Modifier.padding(horizontal = 16.dp, vertical = 8.dp)) {
+                    val b = s.bulk
+                    Text(if (b != null) "$label ${b.index + 1} of ${b.count}" else label, style = MaterialTheme.typography.titleSmall)
+                    if (b != null && b.total > 0) androidx.compose.material3.LinearProgressIndicator(progress = { b.done.toFloat() / b.total }, Modifier.fillMaxWidth())
+                    else androidx.compose.material3.LinearProgressIndicator(Modifier.fillMaxWidth())
+                    TextButton(onClick = vm::cancelBulk) { Text("Cancel") }
+                }
+            }
             androidx.compose.foundation.layout.Row(
                 Modifier.padding(horizontal = 16.dp),
                 horizontalArrangement = Arrangement.spacedBy(8.dp),
