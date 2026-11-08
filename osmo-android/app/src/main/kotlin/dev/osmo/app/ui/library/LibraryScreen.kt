@@ -1,3 +1,5 @@
+@file:OptIn(androidx.compose.material3.ExperimentalMaterial3ExpressiveApi::class)
+
 package dev.osmo.app.ui.library
 
 import android.graphics.BitmapFactory
@@ -26,7 +28,12 @@ import androidx.compose.material.icons.filled.PhoneAndroid
 import androidx.compose.material.icons.filled.Download
 import androidx.compose.material.icons.filled.StarBorder
 import androidx.compose.material.icons.filled.Star
-import androidx.compose.material.icons.filled.CheckCircle
+import androidx.compose.material.icons.filled.Check
+import androidx.compose.material.icons.filled.PlayArrow
+import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.foundation.layout.size
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ExperimentalMaterial3Api
@@ -146,7 +153,7 @@ class LibraryViewModel(private val repo: CameraRepository) : ViewModel() {
     }
 }
 
-@OptIn(ExperimentalMaterial3Api::class, ExperimentalFoundationApi::class)
+@OptIn(ExperimentalMaterial3Api::class, ExperimentalFoundationApi::class, androidx.compose.material3.ExperimentalMaterial3ExpressiveApi::class)
 @Composable
 fun LibraryScreen(vm: LibraryViewModel, onOpen: (MediaFile) -> Unit, onLocal: () -> Unit, onBack: () -> Unit) {
     val s by vm.state.collectAsStateWithLifecycle()
@@ -157,28 +164,26 @@ fun LibraryScreen(vm: LibraryViewModel, onOpen: (MediaFile) -> Unit, onLocal: ()
     Scaffold(
         snackbarHost = { SnackbarHost(snack) },
         topBar = {
-            if (s.selected.isEmpty()) {
-                TopAppBar(
-                    title = { Text("Library") },
-                    navigationIcon = { IconButton(onClick = onBack) { Icon(Icons.AutoMirrored.Filled.ArrowBack, "Back") } },
-                    actions = {
+            TopAppBar(
+                title = {
+                    Column {
+                        Text(if (s.selected.isEmpty()) "Library" else "${s.selected.size} selected", style = MaterialTheme.typography.titleLarge)
+                        if (s.selected.isEmpty() && s.files.isNotEmpty()) {
+                            Text("${s.files.size} on camera", style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                        }
+                    }
+                },
+                navigationIcon = {
+                    if (s.selected.isEmpty()) IconButton(onClick = onBack) { Icon(Icons.AutoMirrored.Filled.ArrowBack, "Back") }
+                    else IconButton(onClick = vm::clearSelection) { Icon(Icons.Filled.Close, "Clear selection") }
+                },
+                actions = {
+                    if (s.selected.isEmpty()) {
                         IconButton(onClick = onLocal) { Icon(Icons.Filled.PhoneAndroid, "On this phone") }
                         IconButton(onClick = vm::refresh) { Icon(Icons.Filled.Refresh, "Refresh") }
-                    },
-                )
-            } else {
-                TopAppBar(
-                    title = { Text("${s.selected.size} selected") },
-                    navigationIcon = { IconButton(onClick = vm::clearSelection) { Icon(Icons.Filled.Close, "Clear selection") } },
-                    actions = {
-                        val idle = s.busy == null
-                        IconButton(onClick = vm::downloadSelected, enabled = idle) { Icon(Icons.Filled.Download, "Download selected") }
-                        IconButton(onClick = { vm.starSelected(true) }, enabled = idle) { Icon(Icons.Filled.Star, "Star selected") }
-                        IconButton(onClick = { vm.starSelected(false) }, enabled = idle) { Icon(Icons.Filled.StarBorder, "Un-star selected") }
-                        IconButton(onClick = vm::planDelete, enabled = idle) { Icon(Icons.Filled.Delete, "Delete selected") }
-                    },
-                )
-            }
+                    }
+                },
+            )
         },
     ) { pad ->
         Column(Modifier.padding(pad).fillMaxSize()) {
@@ -186,8 +191,8 @@ fun LibraryScreen(vm: LibraryViewModel, onOpen: (MediaFile) -> Unit, onLocal: ()
                 Column(Modifier.padding(horizontal = 16.dp, vertical = 8.dp)) {
                     val b = s.bulk
                     Text(if (b != null) "$label ${b.index + 1} of ${b.count}" else label, style = MaterialTheme.typography.titleSmall)
-                    if (b != null && b.total > 0) androidx.compose.material3.LinearProgressIndicator(progress = { b.done.toFloat() / b.total }, Modifier.fillMaxWidth())
-                    else androidx.compose.material3.LinearProgressIndicator(Modifier.fillMaxWidth())
+                    if (b != null && b.total > 0) androidx.compose.material3.LinearWavyProgressIndicator(progress = { b.done.toFloat() / b.total }, Modifier.fillMaxWidth())
+                    else androidx.compose.material3.LinearWavyProgressIndicator(Modifier.fillMaxWidth())
                     TextButton(onClick = vm::cancelBulk) { Text("Cancel") }
                 }
             }
@@ -200,11 +205,11 @@ fun LibraryScreen(vm: LibraryViewModel, onOpen: (MediaFile) -> Unit, onLocal: ()
                 FilterChip(selected = s.starredOnly, onClick = vm::toggleStarred, label = { Text("Starred") })
             }
             Box(Modifier.fillMaxSize()) {
-                if (s.loading && s.files.isEmpty()) CircularProgressIndicator(Modifier.align(Alignment.Center))
-                else if (s.files.isEmpty()) Text("Nothing on the camera.", Modifier.align(Alignment.Center))
+                if (s.loading && s.files.isEmpty()) androidx.compose.material3.LoadingIndicator(Modifier.align(Alignment.Center).size(64.dp))
+                else if (s.files.isEmpty()) Text("Nothing on the camera yet.", Modifier.align(Alignment.Center), style = MaterialTheme.typography.titleMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
                 LazyVerticalGrid(
                     columns = GridCells.Adaptive(112.dp),
-                    contentPadding = PaddingValues(16.dp),
+                    contentPadding = PaddingValues(start = 16.dp, end = 16.dp, top = 12.dp, bottom = 112.dp),
                     horizontalArrangement = Arrangement.spacedBy(8.dp),
                     verticalArrangement = Arrangement.spacedBy(8.dp),
                     modifier = Modifier.fillMaxSize(),
@@ -213,6 +218,20 @@ fun LibraryScreen(vm: LibraryViewModel, onOpen: (MediaFile) -> Unit, onLocal: ()
                         Tile(f, f.path in s.selected, vm,
                             onClick = { if (s.selected.isEmpty()) onOpen(f) else vm.toggle(f.path) },
                             onLong = { vm.toggle(f.path) })
+                    }
+                }
+                androidx.compose.animation.AnimatedVisibility(
+                    visible = s.selected.isNotEmpty(),
+                    modifier = Modifier.align(Alignment.BottomCenter).padding(bottom = 16.dp),
+                    enter = androidx.compose.animation.fadeIn() + androidx.compose.animation.slideInVertically { it },
+                    exit = androidx.compose.animation.fadeOut() + androidx.compose.animation.slideOutVertically { it },
+                ) {
+                    val idle = s.busy == null
+                    androidx.compose.material3.HorizontalFloatingToolbar(expanded = true) {
+                        IconButton(onClick = vm::downloadSelected, enabled = idle) { Icon(Icons.Filled.Download, "Download selected") }
+                        IconButton(onClick = { vm.starSelected(true) }, enabled = idle) { Icon(Icons.Filled.Star, "Star selected") }
+                        IconButton(onClick = { vm.starSelected(false) }, enabled = idle) { Icon(Icons.Filled.StarBorder, "Un-star selected") }
+                        IconButton(onClick = vm::planDelete, enabled = idle) { Icon(Icons.Filled.Delete, "Delete selected", tint = MaterialTheme.colorScheme.error) }
                     }
                 }
             }
@@ -236,17 +255,35 @@ private fun Tile(f: MediaFile, selected: Boolean, vm: LibraryViewModel, onClick:
     val bmp by produceState<androidx.compose.ui.graphics.ImageBitmap?>(null, f.path) {
         value = vm.thumbnail(f.path)?.let { b -> BitmapFactory.decodeByteArray(b, 0, b.size)?.asImageBitmap() }
     }
+    val scheme = MaterialTheme.colorScheme
+    // Selection morphs the tile: corners grow and it shrinks inside its cell (spatial spring, expressive scheme).
+    // Radii are scale steps from the M3 shape scale (medium 12dp -> extra-large 28dp).
+    val spec = MaterialTheme.motionScheme.defaultSpatialSpec<androidx.compose.ui.unit.Dp>()
+    val radius by androidx.compose.animation.core.animateDpAsState(if (selected) 28.dp else 12.dp, spec, label = "radius")
+    val scaleSpec = MaterialTheme.motionScheme.defaultSpatialSpec<Float>()
+    val scale by androidx.compose.animation.core.animateFloatAsState(if (selected) 0.9f else 1f, scaleSpec, label = "scale")
     Box(
-        Modifier.aspectRatio(1f).clip(MaterialTheme.shapes.medium)
-            .background(MaterialTheme.colorScheme.surfaceContainerHigh)
+        Modifier.aspectRatio(1f).graphicsLayer { scaleX = scale; scaleY = scale }
+            .clip(androidx.compose.foundation.shape.RoundedCornerShape(radius))
+            .background(scheme.surfaceContainerHigh)
             .combinedClickable(onClick = onClick, onLongClick = onLong),
     ) {
         bmp?.let { Image(it, f.path, Modifier.fillMaxSize(), contentScale = ContentScale.Crop) }
-        if (f.kind == MediaKind.VIDEO) Icon(Icons.Filled.PlayCircle, null, Modifier.align(Alignment.Center), tint = MaterialTheme.colorScheme.surface)
-        if (f.starred) Icon(Icons.Filled.Star, "Starred", Modifier.align(Alignment.TopEnd).padding(6.dp), tint = MaterialTheme.colorScheme.tertiary)
+        if (f.kind == MediaKind.VIDEO) {
+            Box(Modifier.align(Alignment.BottomStart).padding(6.dp).background(scheme.scrim.copy(alpha = 0.55f), CircleShape).padding(4.dp)) {
+                Icon(Icons.Filled.PlayArrow, "Video", Modifier.size(16.dp), tint = Color.White)
+            }
+        }
+        if (f.starred) {
+            Box(Modifier.align(Alignment.TopEnd).padding(6.dp).background(scheme.tertiaryContainer, CircleShape).padding(4.dp)) {
+                Icon(Icons.Filled.Star, "Starred", Modifier.size(14.dp), tint = scheme.onTertiaryContainer)
+            }
+        }
         if (selected) {
-            Box(Modifier.fillMaxSize().background(MaterialTheme.colorScheme.primary.copy(alpha = 0.35f)))
-            Icon(Icons.Filled.CheckCircle, "Selected", Modifier.align(Alignment.TopStart).padding(6.dp), tint = MaterialTheme.colorScheme.onPrimary)
+            Box(Modifier.fillMaxSize().background(scheme.primary.copy(alpha = 0.28f)))
+            Box(Modifier.align(Alignment.TopStart).padding(8.dp).background(scheme.primary, CircleShape).padding(3.dp)) {
+                Icon(Icons.Filled.Check, "Selected", Modifier.size(16.dp), tint = scheme.onPrimary)
+            }
         }
     }
 }

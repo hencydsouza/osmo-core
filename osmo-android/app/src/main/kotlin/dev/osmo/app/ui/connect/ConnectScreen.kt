@@ -1,3 +1,5 @@
+@file:OptIn(androidx.compose.material3.ExperimentalMaterial3ExpressiveApi::class)
+
 package dev.osmo.app.ui.connect
 
 import android.Manifest
@@ -21,7 +23,6 @@ import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
-import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
 import androidx.compose.material.icons.filled.PhoneAndroid
@@ -33,6 +34,28 @@ import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBarDefaults
+import androidx.compose.animation.core.LinearEasing
+import androidx.compose.animation.core.animateFloat
+import androidx.compose.animation.core.infiniteRepeatable
+import androidx.compose.animation.core.rememberInfiniteTransition
+import androidx.compose.animation.core.tween
+import androidx.compose.foundation.background
+import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.heightIn
+import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.statusBarsPadding
+import androidx.compose.material.icons.filled.Bolt
+import androidx.compose.material.icons.filled.CheckCircle
+import androidx.compose.material.icons.filled.PhotoLibrary
+import androidx.compose.material3.ExperimentalMaterial3ExpressiveApi
+import androidx.compose.material3.FilledTonalButton
+import androidx.compose.material3.IconButton
+import androidx.compose.material3.LoadingIndicator
+import androidx.compose.material3.MaterialShapes
+import androidx.compose.material3.Surface
+import androidx.compose.material3.toShape
+import androidx.compose.ui.draw.rotate
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -98,7 +121,7 @@ private fun blePermissions(): Array<String> =
     if (Build.VERSION.SDK_INT >= 31) arrayOf(Manifest.permission.BLUETOOTH_SCAN, Manifest.permission.BLUETOOTH_CONNECT)
     else arrayOf(Manifest.permission.ACCESS_FINE_LOCATION)
 
-@OptIn(ExperimentalMaterial3Api::class)
+@OptIn(ExperimentalMaterial3ExpressiveApi::class)
 @Composable
 fun ConnectScreen(vm: ConnectViewModel, sdkVersion: String, onLocal: () -> Unit, onConnected: () -> Unit) {
     val link by vm.link.collectAsStateWithLifecycle()
@@ -117,92 +140,121 @@ fun ConnectScreen(vm: ConnectViewModel, sdkVersion: String, onLocal: () -> Unit,
         if (missing.isEmpty()) vm.startScan() else launcher.launch(missing.toTypedArray())
     }
 
-    val scroll = TopAppBarDefaults.exitUntilCollapsedScrollBehavior()
+    val working = link is Link.Working
+    val connected = link is Link.Connected
+    val scheme = MaterialTheme.colorScheme
+
     Scaffold(
-        modifier = Modifier.nestedScroll(scroll.nestedScrollConnection),
+        containerColor = scheme.surface,
         topBar = {
-            LargeTopAppBar(
-                title = { Text("Osmo") },
-                actions = { androidx.compose.material3.IconButton(onClick = onLocal) { androidx.compose.material3.Icon(androidx.compose.material.icons.Icons.Filled.PhoneAndroid, "On this phone") } },
-                scrollBehavior = scroll,
-            )
+            Row(Modifier.fillMaxWidth().statusBarsPadding().padding(horizontal = 8.dp, vertical = 4.dp), horizontalArrangement = Arrangement.End) {
+                IconButton(onClick = onLocal) { Icon(Icons.Filled.PhoneAndroid, "On this phone") }
+            }
         },
     ) { pad ->
         LazyColumn(
             Modifier.fillMaxSize().padding(pad),
-            contentPadding = PaddingValues(16.dp),
-            verticalArrangement = Arrangement.spacedBy(12.dp),
+            contentPadding = PaddingValues(horizontal = 24.dp, vertical = 8.dp),
+            horizontalAlignment = Alignment.CenterHorizontally,
         ) {
+            // Hero moment (the one per product): the camera badge. A 9-sided cookie that spins while
+            // pairing and settles when connected. Shape from the M3 shape library.
             item {
-                when (val l = link) {
-                    is Link.Connected -> Card(
-                        Modifier.fillMaxWidth(),
-                        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.primaryContainer),
-                    ) {
-                        Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
-                            Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(12.dp)) {
-                                Icon(Icons.Filled.CameraAlt, null)
-                                Text("Connected to ${l.name}", style = MaterialTheme.typography.titleMedium)
-                            }
-                            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                                Button(onClick = onConnected) { Text("Open library") }
-                                OutlinedButton(onClick = vm::disconnect) { Text("Disconnect") }
-                            }
-                        }
-                    }
-                    is Link.Working -> Card(Modifier.fillMaxWidth()) {
-                        Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
-                            Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(16.dp)) {
-                                CircularProgressIndicator()
-                                Text(l.step, style = MaterialTheme.typography.titleMedium)
-                            }
-                            if (l.needsApproval) {
-                                Text("Look at the camera screen and confirm pairing.", style = MaterialTheme.typography.bodyMedium)
-                            }
-                            TextButton(onClick = vm::cancel) { Text("Cancel") }
-                        }
-                    }
-                    else -> Card(Modifier.fillMaxWidth()) {
-                        Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
-                            if (l is Link.Failed) Text(l.message, color = MaterialTheme.colorScheme.error)
-                            val s = saved
-                            if (s != null) {
-                                Text(s.name, style = MaterialTheme.typography.titleMedium)
-                                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                                    Button(onClick = { vm.connect(null) }) { Text("Connect") }
-                                    TextButton(onClick = vm::forget) { Text("Forget") }
-                                }
-                            } else {
-                                Text("No camera yet", style = MaterialTheme.typography.titleMedium)
-                                Text("Turn the camera on, then scan.", style = MaterialTheme.typography.bodyMedium)
-                            }
-                        }
-                    }
-                }
-            }
-            if (link !is Link.Working && link !is Link.Connected) {
-                item {
-                    OutlinedButton(onClick = ::scan, contentPadding = ButtonDefaults.ButtonWithIconContentPadding) {
-                        Icon(Icons.Filled.Bluetooth, null)
-                        Text("Scan for cameras", Modifier.padding(start = 8.dp))
-                    }
-                }
-                if (denied) item { Text("Bluetooth permission is needed to find the camera.", color = MaterialTheme.colorScheme.error) }
-                scanError?.let { e -> item { Text(e, color = MaterialTheme.colorScheme.error) } }
-                items(found, key = { it.address }) { cam ->
-                    ListItem(
-                        headlineContent = { Text(cam.name) },
-                        supportingContent = { Text("${cam.rssi} dBm") },
-                        leadingContent = { Icon(Icons.Filled.CameraAlt, null) },
-                        trailingContent = { Button(onClick = { vm.connect(cam) }) { Text("Pair") } },
+                Box(Modifier.padding(top = 16.dp, bottom = 28.dp), contentAlignment = Alignment.Center) {
+                    val spin by rememberInfiniteTransition(label = "spin").animateFloat(
+                        0f, 360f, infiniteRepeatable(tween(9000, easing = LinearEasing)), label = "deg",
+                    )
+                    Box(
+                        Modifier.size(176.dp).rotate(if (working) spin else 0f)
+                            .background(if (connected) scheme.secondaryContainer else scheme.primaryContainer, MaterialShapes.Cookie9Sided.toShape()),
+                    )
+                    if (working) LoadingIndicator(Modifier.size(72.dp), color = scheme.onPrimaryContainer)
+                    else Icon(
+                        if (connected) Icons.Filled.CheckCircle else Icons.Filled.CameraAlt, null,
+                        Modifier.size(72.dp), tint = if (connected) scheme.onSecondaryContainer else scheme.onPrimaryContainer,
                     )
                 }
             }
             item {
+                val (title, sub) = when (val l = link) {
+                    is Link.Connected -> "Connected" to l.name
+                    is Link.Working -> l.step to (if (l.needsApproval) "Look at the camera screen and confirm pairing." else "Hang on, this takes a few seconds.")
+                    is Link.Failed -> "Couldn\u2019t connect" to l.message
+                    else -> (if (saved != null) "Welcome back" else "Find your Osmo") to
+                        (saved?.name ?: "Turn the camera on, then scan.")
+                }
+                Column(horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Text(title, style = MaterialTheme.typography.headlineLarge, textAlign = TextAlign.Center)
+                    Text(
+                        sub, style = MaterialTheme.typography.bodyLarge, textAlign = TextAlign.Center,
+                        color = if (link is Link.Failed) scheme.error else scheme.onSurfaceVariant,
+                    )
+                }
+            }
+            item {
+                Column(Modifier.padding(top = 32.dp).fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(12.dp)) {
+                    when (link) {
+                        is Link.Connected -> {
+                            // Primary action is the biggest thing on screen.
+                            Button(onClick = onConnected, Modifier.fillMaxWidth().heightIn(min = 64.dp), shape = MaterialTheme.shapes.extraLarge) {
+                                Icon(Icons.Filled.PhotoLibrary, null)
+                                Text("Open library", Modifier.padding(start = 12.dp), style = MaterialTheme.typography.titleMedium)
+                            }
+                            TextButton(onClick = vm::disconnect, Modifier.fillMaxWidth()) { Text("Disconnect") }
+                        }
+                        is Link.Working -> TextButton(onClick = vm::cancel, Modifier.fillMaxWidth()) { Text("Cancel") }
+                        else -> {
+                            if (saved != null) {
+                                Button(onClick = { vm.connect(null) }, Modifier.fillMaxWidth().heightIn(min = 64.dp), shape = MaterialTheme.shapes.extraLarge) {
+                                    Icon(Icons.Filled.Bolt, null)
+                                    Text("Connect to ${saved!!.name}", Modifier.padding(start = 12.dp), style = MaterialTheme.typography.titleMedium, maxLines = 1)
+                                }
+                            }
+                            val scanColors = if (saved != null) null else ButtonDefaults.buttonColors()
+                            if (scanColors != null) {
+                                Button(onClick = ::scan, Modifier.fillMaxWidth().heightIn(min = 64.dp), shape = MaterialTheme.shapes.extraLarge) {
+                                    Icon(Icons.Filled.Bluetooth, null)
+                                    Text("Scan for cameras", Modifier.padding(start = 12.dp), style = MaterialTheme.typography.titleMedium)
+                                }
+                            } else {
+                                androidx.compose.material3.OutlinedButton(onClick = ::scan, Modifier.fillMaxWidth().heightIn(min = 56.dp)) {
+                                    Icon(Icons.Filled.Bluetooth, null)
+                                    Text("Scan for another camera", Modifier.padding(start = 8.dp))
+                                }
+                                TextButton(onClick = vm::forget, Modifier.fillMaxWidth()) { Text("Forget this camera") }
+                            }
+                            if (denied) Text("Bluetooth permission is needed to find the camera.", color = scheme.error, style = MaterialTheme.typography.bodyMedium)
+                            scanError?.let { Text(it, color = scheme.error, style = MaterialTheme.typography.bodyMedium) }
+                        }
+                    }
+                }
+            }
+            if (!working && !connected && found.isNotEmpty()) {
+                item { Text("Nearby", Modifier.fillMaxWidth().padding(top = 28.dp, bottom = 8.dp), style = MaterialTheme.typography.titleMedium) }
+                items(found, key = { it.address }) { cam ->
+                    Surface(
+                        onClick = { vm.connect(cam) },
+                        Modifier.fillMaxWidth().padding(bottom = 8.dp),
+                        shape = MaterialTheme.shapes.large,
+                        color = scheme.surfaceContainerHigh,
+                    ) {
+                        Row(Modifier.padding(16.dp), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(16.dp)) {
+                            Box(Modifier.size(44.dp).background(scheme.primaryContainer, MaterialShapes.Cookie6Sided.toShape()), contentAlignment = Alignment.Center) {
+                                Icon(Icons.Filled.CameraAlt, null, Modifier.size(22.dp), tint = scheme.onPrimaryContainer)
+                            }
+                            Column(Modifier.weight(1f)) {
+                                Text(cam.name, style = MaterialTheme.typography.titleMedium)
+                                Text("${cam.rssi} dBm", style = MaterialTheme.typography.bodyMedium, color = scheme.onSurfaceVariant)
+                            }
+                            Text("Pair", style = MaterialTheme.typography.labelLarge, color = scheme.primary)
+                        }
+                    }
+                }
+            }
+            item {
                 Text(
-                    "SDK $sdkVersion",
-                    style = MaterialTheme.typography.labelMedium,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    "SDK $sdkVersion", Modifier.padding(top = 32.dp, bottom = 16.dp),
+                    style = MaterialTheme.typography.labelMedium, color = scheme.onSurfaceVariant,
                 )
             }
         }

@@ -1,3 +1,5 @@
+@file:OptIn(androidx.compose.material3.ExperimentalMaterial3ExpressiveApi::class)
+
 package dev.osmo.app.ui.detail
 
 import android.graphics.BitmapFactory
@@ -20,7 +22,7 @@ import androidx.compose.material3.Button
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
-import androidx.compose.material3.LinearProgressIndicator
+import androidx.compose.material3.LinearWavyProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
@@ -167,8 +169,8 @@ fun DetailScreen(vm: DetailViewModel, onBack: () -> Unit) {
             s.busy?.let { label ->
                 Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
                     Text(label, style = MaterialTheme.typography.titleSmall)
-                    if (s.total > 0) LinearProgressIndicator(progress = { s.done.toFloat() / s.total }, Modifier.fillMaxWidth())
-                    else LinearProgressIndicator(Modifier.fillMaxWidth())
+                    if (s.total > 0) LinearWavyProgressIndicator(progress = { s.done.toFloat() / s.total }, Modifier.fillMaxWidth())
+                    else LinearWavyProgressIndicator(Modifier.fillMaxWidth())
                     TextButton(onClick = vm::cancel) { Text("Cancel") }
                 }
             }
