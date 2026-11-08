@@ -228,7 +228,7 @@ fun DetailScreen(vm: DetailViewModel, active: Boolean = true, position: String =
         topBar = {
             TopAppBar(
                 title = { if (position.isNotEmpty()) Text(position, style = MaterialTheme.typography.titleMedium) },
-                navigationIcon = { IconButton(onClick = onBack) { Icon(Icons.AutoMirrored.Filled.ArrowBack, "Back") } },
+                navigationIcon = { IconButton(onClick = onBack, colors = IconButtonDefaults.iconButtonColors(containerColor = MaterialTheme.colorScheme.surfaceBright)) { Icon(Icons.AutoMirrored.Filled.ArrowBack, "Back") } },
                 actions = {
                     IconButton(onClick = { showInfo = true }) { Icon(Icons.Filled.Info, "Details") }
                     IconToggleButton(checked = s.starred, onCheckedChange = { vm.toggleStar() }, enabled = idle) {

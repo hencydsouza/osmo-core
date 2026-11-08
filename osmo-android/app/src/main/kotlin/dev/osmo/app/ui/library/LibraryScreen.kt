@@ -40,6 +40,7 @@ import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.FilterChip
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
+import androidx.compose.material3.IconButtonDefaults
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.SnackbarHost
@@ -160,6 +161,7 @@ class LibraryViewModel(private val repo: CameraRepository) : ViewModel() {
 fun LibraryScreen(vm: LibraryViewModel, onOpen: (MediaFile) -> Unit, onLocal: () -> Unit, onBack: () -> Unit) {
     val s by vm.state.collectAsStateWithLifecycle()
     val snack = remember { SnackbarHostState() }
+    val haptic = androidx.compose.ui.platform.LocalHapticFeedback.current
     LaunchedEffect(Unit) { if (vm.state.value.files.isEmpty()) vm.refresh() }
     var cam by remember { androidx.compose.runtime.mutableStateOf<uniffi.osmo_ffi.CameraStatus?>(null) }
     LaunchedEffect(Unit) { while (true) { vm.status()?.let { cam = it }; kotlinx.coroutines.delay(5000) } }
@@ -185,7 +187,7 @@ fun LibraryScreen(vm: LibraryViewModel, onOpen: (MediaFile) -> Unit, onLocal: ()
                     }
                 },
                 navigationIcon = {
-                    if (s.selected.isEmpty()) IconButton(onClick = onBack) { Icon(Icons.AutoMirrored.Filled.ArrowBack, "Back") }
+                    if (s.selected.isEmpty()) IconButton(onClick = onBack, colors = IconButtonDefaults.iconButtonColors(containerColor = MaterialTheme.colorScheme.surfaceBright)) { Icon(Icons.AutoMirrored.Filled.ArrowBack, "Back") }
                     else IconButton(onClick = vm::clearSelection) { Icon(Icons.Filled.Close, "Clear selection") }
                 },
                 actions = {
@@ -228,7 +230,7 @@ fun LibraryScreen(vm: LibraryViewModel, onOpen: (MediaFile) -> Unit, onLocal: ()
                     items(s.files, key = { it.path }) { f ->
                         Tile(f, f.path in s.selected, vm,
                             onClick = { if (s.selected.isEmpty()) onOpen(f) else vm.toggle(f.path) },
-                            onLong = { vm.toggle(f.path) })
+                            onLong = { haptic.performHapticFeedback(androidx.compose.ui.hapticfeedback.HapticFeedbackType.LongPress); vm.toggle(f.path) })
                     }
                 }
                 androidx.compose.animation.AnimatedVisibility(
