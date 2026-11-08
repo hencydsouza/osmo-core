@@ -145,12 +145,18 @@ pub fn load_in(dir: &Path) -> io::Result<Vec<SavedCamera>> {
                 }
                 let bytes = fs::read(entry.path())?;
                 let camera: SavedCamera = serde_json::from_slice(&bytes).map_err(|_| {
-                    io::Error::new(io::ErrorKind::InvalidData, "invalid saved camera data")
+                    io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        format!("invalid saved camera data in {} (delete that file to forget the camera)", entry.path().display()),
+                    )
                 })?;
                 if filename(&camera.id)? != name {
                     return Err(io::Error::new(
                         io::ErrorKind::InvalidData,
-                        "saved camera identifier does not match its file",
+                        format!(
+                            "saved camera identifier does not match its file {}",
+                            entry.path().display()
+                        ),
                     ));
                 }
                 cameras.push(camera);
@@ -244,8 +250,12 @@ mod tests {
             .unwrap()
             .unwrap()
             .path();
-        std::fs::write(path, "not JSON").unwrap();
-        assert!(load_in(d.path()).is_err());
+        std::fs::write(&path, "not JSON").unwrap();
+        let err = load_in(d.path()).unwrap_err().to_string();
+        assert!(
+            err.contains(path.file_name().unwrap().to_str().unwrap()),
+            "{err}"
+        );
     }
 
     #[test]

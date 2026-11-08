@@ -122,6 +122,14 @@ const CONNECT_TIMEOUT: Duration = Duration::from_secs(15);
 
 /// Connect with a time limit and a few retries: CoreBluetooth connects fail transiently, and a stalled one never
 /// returns on its own.
+/// Disconnect, giving up after 5 s: a Bluetooth stack that never answers must not hang the command on exit.
+fn disconnect(rt: &Runtime, p: &Peripheral) {
+    // The timeout must be built inside the runtime: outside it, tokio panics ("no reactor running").
+    rt.block_on(async {
+        let _ = tokio::time::timeout(Duration::from_secs(5), p.disconnect()).await;
+    });
+}
+
 fn connect_inner(
     rt: Arc<Runtime>,
     found: &Found,
@@ -133,7 +141,7 @@ fn connect_inner(
             eprintln!(
                 "Bluetooth connection failed ({last}); retrying ({attempt}/{CONNECT_ATTEMPTS}) ..."
             );
-            let _ = rt.block_on(found.peripheral.disconnect());
+            disconnect(&rt, &found.peripheral);
             std::thread::sleep(Duration::from_secs(1));
         }
         match connect_once(rt.clone(), found, arm_pairing) {
@@ -222,6 +230,6 @@ impl BleLink for BtleplugLink {
 
 impl Drop for BtleplugLink {
     fn drop(&mut self) {
-        let _ = self.rt.block_on(self.peripheral.disconnect());
+        disconnect(&self.rt, &self.peripheral);
     }
 }

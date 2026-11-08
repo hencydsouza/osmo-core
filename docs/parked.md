@@ -31,6 +31,6 @@ Evidence lives in `docs/hardware-log.md`; the decision trail in `.superpowers/sd
 ## Known limits in what is built
 
 - `rm` now searches older listing pages (fixed 2026-11-08), but a delete that needs more than about 40 s of walking is refused, not sent. The multi-page walk is tested with simulated pages only: the card has 14 files, so everything fits on one page.
-- The final review is unfinished for the GPS wire code, the camera-memory code and the Bluetooth session changes.
+- The final review of the GPS wire code, camera-memory code and Bluetooth session was done 2026-11-08; see `docs/hardware-log.md`.
 - `trim` and `frame` need `ffmpeg` installed.
 - The Wi-Fi helper only works on macOS.

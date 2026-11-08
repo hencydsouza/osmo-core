@@ -381,7 +381,7 @@ impl Session<'_> {
 }
 
 /// Request R-SDK approval over an already-open BLE link. `verify_data` is the request's challenge value.
-/// Does not send GPS before the camera approves. Fixture-tested, not live-verified in osmo-core.
+/// Does not send GPS before the camera approves. Live: an Action 4 approved this and took fixes (2026-11-07).
 pub fn connect<'a>(
     link: &'a mut dyn BleLink,
     identity: Identity,

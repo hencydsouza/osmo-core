@@ -234,3 +234,9 @@ multi-attempt download *with* keepalive (no cuts happened in either keepalive ru
 
 ## rm across pages (2026-11-08)
 - Dry runs only (no delete sent): a typo path is refused by name with nothing deleted; a valid path prints `would delete`. The card has 14 files on one page, so the older-page walk itself was not exercised live (it reuses the `ls --all` paging that HW-A verified).
+
+## Final review (2026-11-08)
+- GPS (`rsdk.rs`, `gps.rs`): framing and reassembler bounded and CRC-checked; the 48-byte payload field order matches Osmosis's `gpsPush`; the stamp is the current local time like Osmosis (a stale fix must not freeze the clip clock); invalid dates, ranges and non-finite velocities are refused. A stale doc comment said not live-verified: fixed.
+- Camera memory (`cameras.rs`): atomic per-camera files, filename checked against the id, damaged data reported not discarded. Fixed: the error now names the damaged file.
+- Bluetooth (`ble_btleplug.rs`): scan and connect retries are bounded (3 x 6 s scan, 3 x 15 s connect). Fixed: disconnect had no time limit and could hang a command on exit; it now gives up after 5 s. A first version of that fix panicked ("no reactor running") because the timeout was built outside the runtime; the live `wifi` run caught it and it is fixed (unit tests cannot cover it).
+- Live after the fixes: `cameras --scan` finds the Action 4; `wifi` returns credentials and exits in about 9 s.
