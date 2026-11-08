@@ -141,3 +141,5 @@ cargo test --workspace     # offline: fixtures and fakes, no camera needed
 
 Protocol layers are tested against Osmosis's captured manifests and documented frames. Passing tests prove our
 side of the protocol, not that a given camera accepts it; hardware runs are logged in `docs/hardware-log.md`.
+
+See [docs/parked.md](docs/parked.md) for what is parked, why, and what would restart it.
