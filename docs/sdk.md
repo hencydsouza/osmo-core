@@ -21,7 +21,7 @@ download, favourite, delete and lossless trim/frame. Same code as the `osmo` CLI
 
 ## API tour
 Swift: `let cam = Camera(ip: "192.168.2.1", port: 9004); let files = try cam.list(filter: ListFilter(kind: nil, starredOnly: false), all: false)`
-Kotlin: `val cam = Camera("192.168.2.1", 9004u); cam.trim(path, 1.0, 3.0, dest, null)`
+Kotlin: `val cam = Camera("192.168.2.1", 9004u.toUShort()); cam.trim(path, 1.0, 3.0, dest, null)`
 Also: `trimLocalFile` (no camera), `frameClip`, `planDelete` then `delete` (delete only what the plan returned).
 
 ## Not included

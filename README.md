@@ -135,6 +135,8 @@ coordinates. On EOF or Ctrl-C it disconnects.
 Run `osmo gps` directly, not inside `with-wifi`; approve the R-SDK connection on the camera if prompted. The Rust
 GPS implementation is tested against reference frames and a simulated camera, but has not been tested on hardware.
 
+Guides: see `docs/README.md` (getting started, CLI reference, Swift and Android SDK guides).
+
 ## Develop
 
 ```
