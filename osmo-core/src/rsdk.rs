@@ -244,6 +244,8 @@ pub fn gps_payload(fix: &GpsFix) -> Result<[u8; 48], Error> {
         fix.speed_accuracy_cm_s.to_le_bytes(),
         fix.satellites.to_le_bytes(),
     ];
+    #[allow(unknown_lints, clippy::chunks_exact_to_as_chunks)] // as_chunks needs a newer Rust than we support
+
     for (chunk, value) in p.chunks_exact_mut(4).zip(fields) {
         chunk.copy_from_slice(&value);
     }
