@@ -50,8 +50,13 @@ jobs:
       - run: cargo install cargo-ndk --locked
       - uses: actions/setup-java@v4
         with: { distribution: temurin, java-version: "17" }
-      - run: scripts/build-sdk-android.sh
-        env: { ANDROID_NDK_HOME: /usr/local/lib/android/sdk/ndk/27.2.12479018 }
+      - run: |
+          export ANDROID_NDK_HOME="$ANDROID_NDK_LATEST_HOME"
+          scripts/build-sdk-android.sh
+      - name: Enable KVM
+        run: |
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' | sudo tee /etc/udev/rules.d/99-kvm4all.rules
+          sudo udevadm control --reload-rules && sudo udevadm trigger --name-match=kvm
       - name: Instrumented tests on an x86_64 emulator
         uses: reactivecircus/android-emulator-runner@v2
         with:
