@@ -16,6 +16,7 @@ import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.Download
+import androidx.compose.material.icons.filled.Info
 import androidx.compose.material.icons.filled.Star
 import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.StarBorder
@@ -164,7 +165,7 @@ class DetailViewModel(private val repo: CameraRepository, val file: MediaFile) :
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-fun DetailScreen(vm: DetailViewModel, onBack: () -> Unit) {
+fun DetailScreen(vm: DetailViewModel, active: Boolean = true, position: String = "", onBack: () -> Unit) {
     val s by vm.state.collectAsStateWithLifecycle()
     val snack = remember { SnackbarHostState() }
     LaunchedEffect(s.message) { s.message?.takeIf { it.isNotEmpty() }?.let { snack.showSnackbar(it) } }
@@ -186,7 +187,8 @@ fun DetailScreen(vm: DetailViewModel, onBack: () -> Unit) {
     var triedOriginal by remember { mutableStateOf(false) }
     var range by remember { mutableStateOf(0f..1f) }
 
-    if (video) {
+    var showInfo by remember { mutableStateOf(false) }
+    if (video && active) {
         LaunchedEffect(Unit) {
             val p = ExoPlayer.Builder(ctx).build()
             p.addListener(object : Player.Listener {
@@ -217,6 +219,7 @@ fun DetailScreen(vm: DetailViewModel, onBack: () -> Unit) {
         LaunchedEffect(s.busy) { if (s.busy != null) player?.pause() }
     }
 
+    if (showInfo) DetailsSheet(vm.file, durationMs) { showInfo = false }
     s.deletePlan?.takeIf { it.isNotEmpty() }?.let { DeleteDialog(it, vm::confirmDelete, vm::cancelDelete) }
 
     Scaffold(
@@ -224,9 +227,10 @@ fun DetailScreen(vm: DetailViewModel, onBack: () -> Unit) {
         snackbarHost = { SnackbarHost(snack) },
         topBar = {
             TopAppBar(
-                title = {},
+                title = { if (position.isNotEmpty()) Text(position, style = MaterialTheme.typography.titleMedium) },
                 navigationIcon = { IconButton(onClick = onBack) { Icon(Icons.AutoMirrored.Filled.ArrowBack, "Back") } },
                 actions = {
+                    IconButton(onClick = { showInfo = true }) { Icon(Icons.Filled.Info, "Details") }
                     IconToggleButton(checked = s.starred, onCheckedChange = { vm.toggleStar() }, enabled = idle) {
                         Icon(if (s.starred) Icons.Filled.Star else Icons.Filled.StarBorder, if (s.starred) "Remove favourite" else "Favourite",
                             tint = if (s.starred) scheme.tertiary else scheme.onSurfaceVariant)
@@ -366,4 +370,42 @@ private fun DeleteDialog(plan: List<MediaFile>, onConfirm: () -> Unit, onDismiss
         confirmButton = { TextButton(onClick = onConfirm) { Text("Delete", color = MaterialTheme.colorScheme.error) } },
         dismissButton = { TextButton(onClick = onDismiss) { Text("Keep") } },
     )
+}
+
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+private fun DetailsSheet(file: MediaFile, durationMs: Long, onDismiss: () -> Unit) {
+    val scheme = MaterialTheme.colorScheme
+    androidx.compose.material3.ModalBottomSheet(onDismissRequest = onDismiss) {
+        Column(Modifier.padding(horizontal = 24.dp).padding(bottom = 32.dp), verticalArrangement = Arrangement.spacedBy(16.dp)) {
+            Text("Details", style = MaterialTheme.typography.titleLarge)
+            val size = file.sizeBytes.toLong()
+            val rows = listOf(
+                "Name" to file.path.substringAfterLast('/'),
+                "Folder" to file.path.substringBeforeLast('/', "—"),
+                "Type" to if (file.kind == MediaKind.VIDEO) "Video" else "Photo",
+                "Size" to if (size >= 1_000_000_000L) "%.2f GB".format(size / 1e9) else "%.1f MB".format(size / 1e6),
+                "Length" to if (durationMs > 0) clock(durationMs) else "—",
+                "Storage" to if (file.storage.toInt() == 0) "Internal" else "SD card",
+                "Favourite" to if (file.starred) "Yes" else "No",
+            )
+            rows.forEach { (k, v) ->
+                Column {
+                    Text(k, style = MaterialTheme.typography.labelMedium, color = scheme.onSurfaceVariant)
+                    Text(v, style = MaterialTheme.typography.bodyLarge)
+                }
+            }
+        }
+    }
+}
+
+@Composable
+fun DetailPager(repo: CameraRepository, start: MediaFile, onBack: () -> Unit) {
+    val files = remember { repo.browseList.takeIf { l -> l.any { it.path == start.path } } ?: listOf(start) }
+    val pager = androidx.compose.foundation.pager.rememberPagerState(initialPage = files.indexOfFirst { it.path == start.path }.coerceAtLeast(0)) { files.size }
+    androidx.compose.foundation.pager.HorizontalPager(pager, Modifier.fillMaxSize(), beyondViewportPageCount = 0, key = { files[it].path }) { i ->
+        val f = files[i]
+        val vm: DetailViewModel = androidx.lifecycle.viewmodel.compose.viewModel(key = f.path) { DetailViewModel(repo, f) }
+        DetailScreen(vm, active = pager.currentPage == i, position = "${i + 1} / ${files.size}", onBack = onBack)
+    }
 }

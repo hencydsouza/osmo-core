@@ -52,6 +52,9 @@ const val CAMERA_IP = "192.168.2.1"
 const val CAMERA_PORT: UShort = 9004u
 
 class CameraRepository(private val app: Application) {
+    /** Last library listing, so the viewer can swipe between neighbours. */
+    @Volatile var browseList: List<MediaFile> = emptyList()
+
     private val store = CameraStore(app)
     val scanner = BleScanner(app)
     private val wifi = WifiBinder(app)
@@ -132,7 +135,7 @@ class CameraRepository(private val app: Application) {
     private suspend fun <T> op(block: (Camera) -> T): T = withContext(Dispatchers.IO) { rw.write { block(cam()) } }
 
     suspend fun list(kind: MediaKind?, starredOnly: Boolean): List<MediaFile> =
-        op { it.list(ListFilter(kind, starredOnly), true) }
+        op { it.list(ListFilter(kind, starredOnly), true) }.also { browseList = it }
 
     /** Cached; misses fetch over HTTP on the shared browse session, up to 6 at a time. */
     suspend fun thumbnail(file: MediaFile): ByteArray? {

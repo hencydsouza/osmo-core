@@ -68,10 +68,7 @@ fun OsmoNav() {
             }
             entry<Detail> { key ->
                 val app = androidx.compose.ui.platform.LocalContext.current.applicationContext as OsmoApp
-                val vm: DetailViewModel = viewModel(key = key.path) {
-                    DetailViewModel(app.repo, key.file())
-                }
-                DetailScreen(vm) { backStack.removeLastOrNull() }
+                dev.osmo.app.ui.detail.DetailPager(app.repo, key.file()) { backStack.removeLastOrNull() }
             }
         },
     )
