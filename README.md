@@ -33,7 +33,7 @@ osmo ls                       # list the newest media (needs the camera's WiFi)
 osmo get DCIM/100MEDIA/DJI_20260101_0001_D.MP4 -o ~/Movies/osmo
 osmo get <path> <path> ...      # several files in one go: completed ones are skipped, a failure doesn't stop the rest
 osmo get --proxy <video>        # the small low-res copy of a clip (about 9x smaller) instead of the full file
-osmo trim <video> --from 0:05 --to 0:15 -o clips   # just that slice, original quality, no re-encode (needs ffmpeg)
+osmo trim <video> --from 0:05 --to 0:15 -o clips   # just that slice, original quality, no re-encode, no ffmpeg needed; the cut starts at the keyframe at or before --from
 osmo frame <video> --at 0:08 -o stills             # one full-resolution JPEG from that moment (needs ffmpeg)
 osmo ls --all                 # every file, paged (--page-size N to force small pages)
 osmo ls --photos|--videos      # only photos or only videos; --starred for favourites only (combine with --all)
